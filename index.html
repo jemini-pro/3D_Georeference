@@ -10,13 +10,25 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
 
-    <!-- Three.js -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <!-- Three.js (3D mode only) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" defer></script>
 
-    <!-- Libraries -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/exif-js"></script>
+    <!-- fflate: 8kB streaming ZIP library. Replaces JSZip because it works
+         on archives larger than available RAM and exposes a filter callback
+         so we can skip videos / oversized files during decompression. -->
+    <script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js" defer></script>
+
+    <!-- exif-js: still needed for EXIF GPS parsing (fflate just gives us bytes) -->
+    <script src="https://cdn.jsdelivr.net/npm/exif-js" defer></script>
+
+    <!-- Leaflet (2D coverage-map mode only, used when upload is too large for 3D) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+        integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" defer></script>
+    <!-- Leaflet.heat for density visualisation on the 2D coverage map -->
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js" defer></script>
 </head>
 
 <body>
@@ -24,7 +36,7 @@
         <div class="sidebar glass-panel">
             <header>
                 <h1>GeoMapper 3D</h1>
-                <p>Visualize your photo locations in 3D space.</p>
+                <p id="subtitle">Visualize your photo locations in 3D space.</p>
             </header>
 
             <div class="controls">
@@ -32,14 +44,15 @@
                     <label for="fileInput">Upload Images (ZIP)</label>
                     <input type="file" id="fileInput" accept=".zip">
                     <div class="upload-status" id="status">Ready to upload</div>
+                    <div class="upload-progress" id="progress"></div>
                 </div>
 
-                <div class="input-group">
+                <div class="input-group" id="bubbleControls">
                     <label for="bubbleSize">Bubble Size: <span id="bubbleSizeValue">5</span></label>
                     <input type="range" id="bubbleSize" min="1" max="20" value="5">
                 </div>
 
-                <div class="input-group">
+                <div class="input-group" id="bubbleColorControl">
                     <label for="bubbleColor">Bubble Color</label>
                     <input type="color" id="bubbleColor" value="#38bdf8"
                         style="width: 100%; height: 40px; cursor: pointer;">
@@ -50,21 +63,29 @@
                     <p style="font-size: 0.8rem; color: var(--text-secondary);">Left Click: Rotate<br>Right Click:
                         Pan<br>Scroll: Zoom</p>
                 </div>
-                <div class="input-group">
+                <div class="input-group" id="mapToggleGroup">
                     <label class="checkbox-container">
                         <input type="checkbox" id="mapToggle" checked>
                         <span class="checkmark"></span>
                         Show Map Overlay
                     </label>
                 </div>
+                <div class="input-group" id="heatToggleGroup" style="display: none;">
+                    <label class="checkbox-container">
+                        <input type="checkbox" id="heatToggle">
+                        <span class="checkmark"></span>
+                        Show density heatmap
+                    </label>
+                </div>
             </div>
         </div>
         <div id="scene-container"></div>
+        <div id="map-container"></div>
     </div>
 
     <div id="tooltip" class="tooltip"></div>
 
-    <script src="script.js"></script>
+    <script src="script.js" defer></script>
 </body>
 
 </html>

@@ -4,31 +4,70 @@ Drag-and-drop visualizer for geotagged photos in **3D space** — upload a ZIP o
 JPEGs and see your images plotted on a real-world map with altitude as Y and
 a camera-direction frustum showing where each shot was pointed.
 
-Built as a single-page Three.js app, no build step, no backend. All client-side.
+For large archives (drone dumps, surveys, exports of thousands of photos) the
+app automatically falls back to a fast **2D coverage map** that scales to
+30 000+ points without breaking a sweat.
+
+Built as a single-page app, no build step, no backend. All client-side.
 
 **Live demo:** https://jem-cell.github.io/3D_Georeference/
 
-![Screenshot: four geotagged photos plotted as bubbles on an OpenStreetMap ground plane with camera frustum arrows showing heading](./screenshot.png)
+![Screenshot: geotagged photos plotted as bubbles on an OpenStreetMap ground plane with camera frustum arrows showing heading](./screenshot.png)
+
+## Two modes, auto-selected
+
+The app picks the right visualisation based on what you upload:
+
+| Mode | When | What you get |
+|------|------|--------------|
+| **3D scene** | < 2 000 photos and < 500 MB | Three.js + OSM ground tiles. Bubbles with altitude as Y, camera frustum arrows showing heading, hover-to-highlight, click-to-centre. |
+| **2D coverage map** | > 2 000 photos or > 500 MB | Leaflet + 5×5 OSM tiles. Every photo as a dot. Optional density heatmap. Renders 30 000 points in seconds. |
+
+You don't choose — the app picks based on your file. Same input, different
+output. Both modes share the same EXIF parsing and lat/lng projection.
 
 ## Features
 
 - **Upload a ZIP of JPEGs** — extracts EXIF GPS in the browser (no upload to any server).
-- **3D bubbles** for each photo at its real-world Mercator position, scaled by altitude.
-- **Camera frustum arrows** drawn from each bubble showing the heading the photo was taken (from `GPSImgDirection`).
+- **3D bubbles** for each photo at its real-world Mercator position, scaled by altitude (3D mode).
+- **Camera frustum arrows** drawn from each bubble showing the heading the photo was taken (3D mode).
 - **OpenStreetMap ground overlay** — 5×5 tile grid at zoom 19 centred on your data.
-- **Bubble controls** — size slider, colour picker, hover-to-highlight.
-- **Click a bubble** to centre the camera on it.
-- **Toggle map overlay** off for a clean dark-sky view.
+- **Bubble controls** — size slider, colour picker, hover-to-highlight (3D mode).
+- **Click a bubble** to centre the camera on it (3D mode).
+- **Density heatmap** toggle for the 2D map.
+
+## Drone / large-archive workflow
+
+DJI / Autel exports and most drone survey ZIPs trigger the 2D mode automatically
+once you exceed 2 000 photos or 500 MB. The 2D view is built for "did my
+survey cover the right area?" — it loads in seconds and pans/zooms smoothly
+even with 30 000 dots.
+
+**Tip:** If you want to see specific shots in 3D from a drone dump, take a
+small subsample (50-100 photos) and zip just that. The app will pick 3D mode
+for the small archive.
+
+**Known limit:** ZIPs over 2 GB fail with a clear error message instead of
+silently crashing the tab. Workaround: split your drone export into chunks
+of < 2 GB on your machine (e.g. `zip -s 1500m archive.zip original/`) and
+upload each chunk separately. Truly streaming > 2 GB archives would require
+reading the End-of-Central-Directory record from the file's tail and using
+`File.slice` to read the central directory on demand — possible but a
+bigger refactor; the current chunk-and-upload path is good enough.
 
 ## How it works
 
-1. `JSZip` reads the uploaded archive in the browser.
-2. `exif-js` pulls GPS latitude / longitude / altitude / heading from each JPEG.
-3. Each image is projected from WGS84 to **Web Mercator** (relative to the
-   dataset's centroid so the origin is at the scene centre).
-4. A `THREE.Mesh` sphere is added at `(x, alt, z)` with an attached
-   `LineSegments` frustum rotated by the EXIF heading.
-5. The camera auto-fits the bounding box of all points.
+1. `fflate.unzipSync` reads the archive with a `filter` callback. Videos
+   (`.mp4`, `.mov`, `.lrv`, …) and any file over 25 MB are skipped during
+   the unzip pass — they're never even inflated, which is what makes
+   multi-GB drone archives practical.
+2. `exif-js` pulls GPS latitude / longitude / altitude / heading from each
+   kept JPEG.
+3. The 3D path projects each image from WGS84 to **Web Mercator** (relative
+   to the dataset's centroid so the origin is at the scene centre) and adds
+   a `THREE.Mesh` sphere with a `LineSegments` frustum.
+4. The 2D path adds each photo as a `L.circleMarker` with a hover tooltip.
+5. The camera / map auto-fits the bounding box of all points.
 
 ### Why Web Mercator relative-to-centroid?
 
@@ -36,6 +75,14 @@ Absolute Mercator coordinates are 10⁷-metre numbers with no useful scene-scale
 meaning. By subtracting the centroid's Mercator (with an antimeridian wrap so
 points across the dateline stay close together) the data sits in a
 comfortable metre-scale space, with `Y` free for altitude.
+
+### Why fflate and not JSZip?
+
+JSZip loads the whole archive into memory before yielding any entries.
+A 5 GB drone export won't fit in V8's per-tab heap on an 8 GB Mac. fflate
+exposes a `filter` callback that runs on entry metadata *before* the bytes
+are decompressed, so we can skip videos and oversized files without ever
+inflating them. Bundle size is 8 kB vs JSZip's 100 kB.
 
 ### Why a single global token for tile loads?
 
@@ -57,10 +104,12 @@ Or any static-file server. There is no build step.
 
 ## Tech
 
-- [Three.js](https://threejs.org/) r128 (CDN, with `OrbitControls`)
-- [JSZip](https://stuk.github.io/jszip/) 3.10
-- [exif-js](https://github.com/exif-js/exif-js)
-- [OpenStreetMap](https://www.openstreetmap.org/) raster tiles (zoom 19)
+- [Three.js](https://threejs.org/) r128 (CDN, with `OrbitControls`) — 3D mode
+- [fflate](https://github.com/101arrowz/fflate) 0.8 — streaming ZIP with filter
+- [exif-js](https://github.com/exif-js/exif-js) — EXIF GPS parsing
+- [Leaflet](https://leafletjs.com/) 1.9 — 2D mode
+- [Leaflet.heat](https://github.com/Leaflet/Leaflet.heat) — density heatmap
+- [OpenStreetMap](https://www.openstreetmap.org/) raster tiles (zoom 19) — both modes
 
 No npm, no bundler, no framework.
 
@@ -86,7 +135,7 @@ the file into an `ArrayBuffer` immediately.
 - **Mercator at the poles**: Web Mercator is undefined above ~85°.0511°
   latitude; latitudes are clamped, so polar photos will cluster at the
   clamp line.
-- **Single ZIP per session**: re-uploading clears the scene and starts fresh.
-- **Tiles are rate-limited by OSM.** If you hammer the upload button, tiles
-  may temporarily fail to load — the bubbles still appear on a flat
-  fallback grid.
+- **2 GB ZIP cap**: archives larger than 2 GB need to be split on your end
+  (see "Drone / large-archive workflow" above).
+- **OSM tile rate limits**: hammering the upload button will cause tiles to
+  fail; the bubbles still appear on a flat fallback grid.

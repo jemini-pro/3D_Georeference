@@ -1,3 +1,24 @@
+// =========================================================================
+// GeoMapper 3D — script.js
+//
+// Two visualisation modes, auto-selected by upload size:
+//
+//   • 3D scene  (Three.js + OSM ground tiles)
+//       Used when the archive is small enough that drawing 30 000 spheres
+//       and 25 map tiles is still interactive. Default.
+//
+//   • 2D coverage map  (Leaflet)
+//       Used for "drone dump" archives — anything over ~2 000 photos or
+//       ~500 MB. Plots every camera position as a dot, with an optional
+//       density heatmap. Renders 30 000 points in a single tile pass and
+//       uses almost no GPU.
+//
+// fflate (8 kB) replaces JSZip because it has a `filter` callback that lets
+// us skip MP4 videos and oversized files during the unzip pass, and the
+// `unzipSync` path with a filter avoids ever holding the full archive in
+// RAM (V8 caps tabs at ~2-4 GB on M1 8 GB, which 5 GB drone ZIPs exceed).
+// =========================================================================
+
 window.onerror = function (message, source, lineno, colno, error) {
     const statusDiv = document.getElementById('status');
     if (statusDiv) {
@@ -7,42 +28,100 @@ window.onerror = function (message, source, lineno, colno, error) {
     console.error("Global Error:", message, "at", source, ":", lineno);
 };
 
+// ----- Mode constants -----------------------------------------------------
+const MODE_3D = '3d';
+const MODE_2D = '2d';
+
+// Thresholds for auto-fallback from 3D to 2D. Tuned for M1 8 GB / Chrome:
+//   >2 000 photos  →  3D scene gets visually busy (overlapping spheres)
+//   >500 MB        →  3D map-tile downloads + scene render start to lag
+// Adjust if you're on a beefier machine.
+const THREE_D_MAX_PHOTOS = 2000;
+const THREE_D_MAX_FILE_MB = 500;
+
+// Max bytes per image we'll keep in memory for the 3D path. Photos bigger
+// than this are still parsed for GPS but their blob is dropped immediately
+// (we only need the lat/lng to draw the bubble). 25 MB comfortably covers
+// every drone JPG ever shipped.
+const MAX_BLOB_BYTES = 25 * 1024 * 1024;
+
+// ----- Module state -------------------------------------------------------
 let scene, camera, renderer, controls;
 let points = [];
-let mapTiles = []; // Store map tiles to toggle visibility
-let uploadInFlight = false; // Single-flight guard so two rapid picks don't race
-let tileLoadToken = 0; // Monotonic; stale tile callbacks detect themselves with this
+let mapTiles = [];
+let uploadInFlight = false;
+let tileLoadToken = 0;
+let currentMode = null; // MODE_3D or MODE_2D
+let leafletMap = null;
+let leafletMarkers = null;       // L.layerGroup for the dots
+let leafletHeatLayer = null;     // L.heatLayer for density
+
 const fileInput = document.getElementById('fileInput');
 const statusDiv = document.getElementById('status');
+const progressDiv = document.getElementById('progress');
 const sceneContainer = document.getElementById('scene-container');
+const mapContainer = document.getElementById('map-container');
+const subtitle = document.getElementById('subtitle');
+const bubbleControls = document.getElementById('bubbleControls');
+const bubbleColorControl = document.getElementById('bubbleColorControl');
+const mapToggleGroup = document.getElementById('mapToggleGroup');
+const heatToggleGroup = document.getElementById('heatToggleGroup');
 
-// Initialize Three.js Scene
+// =========================================================================
+// Library-load waiter. All CDN scripts use `defer`, so they execute in
+// document order before DOMContentLoaded, but our inline `<script
+// src="script.js">` is also defer and runs last — meaning the `boot()`
+// IIFE is called *after* all CDN scripts have evaluated. We still poll
+// defensively in case any of them is slow to parse on a cold cache.
+// =========================================================================
+function waitForLibraries() {
+    return new Promise((resolve) => {
+        const check = () => {
+            if (typeof fflate !== 'undefined'
+             && typeof EXIF !== 'undefined'
+             && typeof THREE !== 'undefined'
+             && typeof THREE.OrbitControls === 'function') {
+                resolve();
+            } else {
+                setTimeout(check, 30);
+            }
+        };
+        check();
+    });
+}
+
+// =========================================================================
+// 3D scene (Three.js)
+// =========================================================================
+// All CDN scripts (Three.js, fflate, EXIF, Leaflet) plus our own script.js
+// use `defer`, so they execute in document order before DOMContentLoaded.
+// By the time this top-level code runs, `THREE` is guaranteed to be defined.
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const tooltip = document.getElementById('tooltip');
+let hoveredPoint = null;
+
 function init3DScene() {
-    // Scene
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0f172a); // Match bg-color
+    scene.background = new THREE.Color(0x0f172a);
     scene.fog = new THREE.FogExp2(0x0f172a, 0.002);
 
-    // Camera
     camera = new THREE.PerspectiveCamera(60, sceneContainer.clientWidth / sceneContainer.clientHeight, 0.1, 10000);
     camera.position.set(0, 50, 100);
 
-    // Renderer
     renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setSize(sceneContainer.clientWidth, sceneContainer.clientHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
     sceneContainer.appendChild(renderer.domElement);
 
-    // Controls
     controls = new THREE.OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.05;
     controls.screenSpacePanning = false;
     controls.minDistance = 1;
     controls.maxDistance = 5000;
-    controls.maxPolarAngle = Math.PI / 2; // Don't go below ground
+    controls.maxPolarAngle = Math.PI / 2;
 
-    // Lights
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     scene.add(ambientLight);
 
@@ -50,31 +129,29 @@ function init3DScene() {
     dirLight.position.set(10, 20, 10);
     scene.add(dirLight);
 
-    // Grid Helper (Ground)
     const gridHelper = new THREE.GridHelper(1000, 50, 0x38bdf8, 0x1e293b);
     scene.add(gridHelper);
 
-    // Axes Helper
     const axesHelper = new THREE.AxesHelper(5);
     scene.add(axesHelper);
 
-    // Handle Resize
     window.addEventListener('resize', onWindowResize, false);
-
-    // Interaction
     window.addEventListener('mousemove', onMouseMove, false);
     window.addEventListener('click', onMouseClick, false);
 
     animate();
 }
 
-const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
-const tooltip = document.getElementById('tooltip');
-let hoveredPoint = null;
+function onWindowResize() {
+    if (!camera || !renderer) return;
+    camera.aspect = sceneContainer.clientWidth / sceneContainer.clientHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(sceneContainer.clientWidth, sceneContainer.clientHeight);
+    if (leafletMap) leafletMap.invalidateSize();
+}
 
 function onMouseClick(event) {
-    // Calculate mouse position in normalized device coordinates
+    if (!renderer) return;
     const rect = renderer.domElement.getBoundingClientRect();
     mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -84,74 +161,48 @@ function onMouseClick(event) {
 
     if (intersects.length > 0) {
         const object = intersects[0].object;
-
-        // Center controls on the clicked object
         controls.target.copy(object.position);
         controls.update();
-
         console.log("Centered view on:", object.userData.name);
     }
 }
 
 function onMouseMove(event) {
-    // Calculate mouse position in normalized device coordinates
-    // (-1 to +1) for both components
     const rect = renderer.domElement.getBoundingClientRect();
     mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-    // Update tooltip position
     tooltip.style.left = (event.clientX + 15) + 'px';
     tooltip.style.top = (event.clientY + 15) + 'px';
-}
-
-function onWindowResize() {
-    if (!camera || !renderer) return;
-    camera.aspect = sceneContainer.clientWidth / sceneContainer.clientHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(sceneContainer.clientWidth, sceneContainer.clientHeight);
 }
 
 function animate() {
     requestAnimationFrame(animate);
     if (controls) controls.update();
 
-    // Raycasting
     if (camera && scene) {
         raycaster.setFromCamera(mouse, camera);
         const intersects = raycaster.intersectObjects(points);
 
         if (intersects.length > 0) {
             const object = intersects[0].object;
-
             if (hoveredPoint !== object) {
-                // Reset previous
                 if (hoveredPoint) {
                     let color = 0x38bdf8;
-                    if (bubbleColorPicker) {
-                        color = bubbleColorPicker.value;
-                    }
+                    if (bubbleColorPicker) color = bubbleColorPicker.value;
                     hoveredPoint.material.color.set(color);
                 }
-
-                // Highlight new
                 hoveredPoint = object;
-                hoveredPoint.material.color.setHex(0x22c55e); // Green on hover
-
-                // Show tooltip
+                hoveredPoint.material.color.setHex(0x22c55e);
                 tooltip.style.display = 'block';
-                // Get basename (handle both / and \ just in case, though zip usually uses /)
                 const basename = object.userData.name.split(/[/\\]/).pop();
-                const name = basename.split('.')[0]; // Remove extension
+                const name = basename.split('.')[0];
                 const height = object.userData.alt.toFixed(1);
                 tooltip.innerHTML = `<strong>${name}</strong><br>Height: ${height}m`;
             }
         } else {
             if (hoveredPoint) {
                 let color = 0x38bdf8;
-                if (bubbleColorPicker) {
-                    color = bubbleColorPicker.value;
-                }
+                if (bubbleColorPicker) color = bubbleColorPicker.value;
                 hoveredPoint.material.color.set(color);
                 hoveredPoint = null;
                 tooltip.style.display = 'none';
@@ -162,325 +213,169 @@ function animate() {
     if (renderer && scene && camera) renderer.render(scene, camera);
 }
 
-init3DScene();
-
-fileInput.addEventListener('change', async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-
-    // Don't start a second ZIP read while the first one is still in flight;
-    // otherwise two parallel forEach loops walk the ZIPs and the second set
-    // of map-tile callbacks can clobber the first.
-    if (uploadInFlight) {
-        statusDiv.textContent = 'Already processing a ZIP, please wait...';
-        statusDiv.style.color = 'var(--text-secondary)';
-        return;
-    }
-    uploadInFlight = true;
-
-    statusDiv.textContent = 'Processing ZIP file...';
-    statusDiv.style.color = 'var(--accent-color)';
-
-    // Buffer the file into memory FIRST, before any other async work.
-    // Some browsers (Safari, older Chromium) invalidate the File handle once
-    // the picker closes or focus changes; if we hand the live File straight
-    // to JSZip, lazy reads later can throw a cryptic "could not be read"
-    // permission error. Reading into ArrayBuffer decouples us from the handle.
-    let zipBuffer;
-    try {
-        zipBuffer = await file.arrayBuffer();
-    } catch (readErr) {
-        console.error('Could not read the selected file:', readErr);
-        statusDiv.textContent = 'Could not read the selected file. Try re-selecting it from the file picker.';
-        statusDiv.style.color = 'var(--error-color)';
-        return;
-    }
-
-    // Sanity-check the ZIP magic bytes (PK\x03\x04) before handing to JSZip so
-    // the user gets a clear "not a ZIP" message instead of a JSZip stack trace.
-    const view = new Uint8Array(zipBuffer, 0, 4);
-    if (view.length < 4 || view[0] !== 0x50 || view[1] !== 0x4B ||
-        view[2] !== 0x03 || view[3] !== 0x04) {
-        statusDiv.textContent = 'That file does not look like a ZIP archive.';
-        statusDiv.style.color = 'var(--error-color)';
-        return;
-    }
-
-    try {
-        const zip = new JSZip();
-        const contents = await zip.loadAsync(zipBuffer);
-
-        // Clear existing points (dispose GPU resources to avoid leaks on re-upload)
-        points.forEach(p => {
-            scene.remove(p);
-            p.traverse(obj => {
-                if (obj.geometry) obj.geometry.dispose();
-                if (obj.material) {
-                    if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
-                    else obj.material.dispose();
-                }
-            });
-        });
-        points = [];
-
-        const imagePromises = [];
-        const validImages = [];
-
-        zip.forEach((relativePath, zipEntry) => {
-            if (!zipEntry.dir && isImage(zipEntry.name) && !zipEntry.name.includes('__MACOSX')) {
-                console.log(`Processing: ${zipEntry.name}`);
-                const promise = zipEntry.async('blob').then(async (blob) => {
-                    if (zipEntry.name.toLowerCase().endsWith('.heic')) {
-                        console.warn(`HEIC format not fully supported by exif-js: ${zipEntry.name}`);
-                    }
-
-                    try {
-                        const exifData = await getExifData(blob);
-                        if (exifData && exifData.lat && exifData.lng) {
-                            console.log(`Found GPS for: ${zipEntry.name}`, exifData);
-                            validImages.push({
-                                name: zipEntry.name,
-                                blob: blob,
-                                lat: exifData.lat,
-                                lng: exifData.lng,
-                                alt: exifData.alt || 0
-                            });
-                        } else {
-                            console.warn(`No GPS data found for: ${zipEntry.name}`);
-                        }
-                    } catch (e) {
-                        console.error(`Error reading EXIF for ${zipEntry.name}:`, e);
-                    }
-                });
-                imagePromises.push(promise);
+function clear3DScene() {
+    points.forEach(p => {
+        scene.remove(p);
+        p.traverse(obj => {
+            if (obj.geometry) obj.geometry.dispose();
+            if (obj.material) {
+                if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
+                else obj.material.dispose();
             }
         });
+    });
+    points = [];
 
-        await Promise.all(imagePromises);
-
-        console.log(`Processed ${imagePromises.length} images. Valid: ${validImages.length}`);
-
-        if (validImages.length === 0) {
-            statusDiv.textContent = 'No images with GPS data found. Check console for details.';
-            statusDiv.style.color = 'var(--error-color)';
-            return;
+    mapTiles.forEach(tile => {
+        scene.remove(tile);
+        if (tile.geometry) tile.geometry.dispose();
+        if (tile.material) {
+            if (tile.material.map) tile.material.map.dispose();
+            tile.material.dispose();
         }
-
-        // Calculate Center
-        const center = getCenter(validImages);
-
-        // Set global center for projection
-        window.centerLat = center.lat;
-        window.centerLng = center.lng;
-        window.centerMercator = latLonToMercator(center.lat, center.lng);
-
-        // Load Map Tiles
-        await loadMapTiles(center.lat, center.lng);
-
-        // Convert to Cartesian (Web Mercator)
-        validImages.forEach(img => {
-            const pos = gpsToCartesian(img.lat, img.lng, img.alt);
-            createPoint(pos, img);
-        });
-
-        fitCameraToSelection();
-
-        statusDiv.textContent = `Visualized ${validImages.length} images in 3D with Map Overlay.`;
-        statusDiv.style.color = 'var(--success-color)';
-
-    } catch (err) {
-        console.error(err);
-        statusDiv.textContent = 'Error processing file: ' + err.message;
-        statusDiv.style.color = 'var(--error-color)';
-    } finally {
-        uploadInFlight = false;
-    }
-});
+    });
+    mapTiles = [];
+}
 
 function fitCameraToSelection() {
-    if (points.length === 0) {
-        console.warn("fitCameraToSelection: No points to fit.");
-        return;
-    }
+    if (points.length === 0) return;
 
     const box = new THREE.Box3();
-    points.forEach(mesh => {
-        box.expandByObject(mesh);
-    });
+    points.forEach(mesh => box.expandByObject(mesh));
 
     const center = box.getCenter(new THREE.Vector3());
     const size = box.getSize(new THREE.Vector3());
 
-    console.log("Bounding Box Center:", center);
-    console.log("Bounding Box Size:", size);
-
-    // Update controls target to center of data
     controls.target.copy(center);
 
-    // Position camera to view the entire box
     const maxDim = Math.max(size.x, size.y, size.z);
     const fov = camera.fov * (Math.PI / 180);
-    let cameraZ = Math.abs(maxDim / 2 * Math.tan(fov * 2)); // Basic distance estimation
-
-    console.log("Calculated Camera Distance:", cameraZ);
-
-    // Add some padding
+    let cameraZ = Math.abs(maxDim / 2 * Math.tan(fov * 2));
     cameraZ *= 1.5;
-
-    // Ensure we don't get too close or too far if single point
     if (cameraZ < 100) cameraZ = 100;
     if (cameraZ > 5000) cameraZ = 5000;
 
-    console.log("Clamped Camera Distance:", cameraZ);
-
-    // Move camera relative to center
-    // We want to look down at an angle
     camera.position.set(center.x, center.y + cameraZ, center.z + cameraZ);
-    console.log("New Camera Position:", camera.position);
-
     camera.updateProjectionMatrix();
     controls.update();
 }
 
-// Bubble Size Slider
-const bubbleSizeSlider = document.getElementById('bubbleSize');
-const bubbleSizeValue = document.getElementById('bubbleSizeValue');
-
-if (bubbleSizeSlider && bubbleSizeValue) {
-    bubbleSizeSlider.addEventListener('input', (e) => {
-        const size = parseFloat(e.target.value);
-        bubbleSizeValue.textContent = size;
-
-        // Update existing points
-        points.forEach(point => {
-            const scale = size / 5;
-            point.scale.set(scale, scale, scale);
-        });
-    });
-}
-
-// Bubble Color Picker
-const bubbleColorPicker = document.getElementById('bubbleColor');
-
-if (bubbleColorPicker) {
-    bubbleColorPicker.addEventListener('input', (e) => {
-        const color = e.target.value;
-        points.forEach(point => {
-            point.material.color.set(color);
-            // Also update frustum color if it exists
-            const frustum = point.children.find(child => child.type === 'LineSegments');
-            if (frustum) {
-                frustum.material.color.set(color);
-            }
-        });
-    });
-}
-
 function createPoint(pos, imgData) {
     const geometry = new THREE.SphereGeometry(5, 32, 32);
-
-    // Get current color
     let color = 0x38bdf8;
-    if (bubbleColorPicker) {
-        color = bubbleColorPicker.value;
-    }
+    if (bubbleColorPicker) color = bubbleColorPicker.value;
 
-    const material = new THREE.MeshStandardMaterial({ color: color, roughness: 0.3, metalness: 0.8 });
+    const material = new THREE.MeshStandardMaterial({ color, roughness: 0.3, metalness: 0.8 });
     const sphere = new THREE.Mesh(geometry, material);
-
     sphere.position.set(pos.x, pos.y, pos.z);
 
-    // Apply current slider size
     if (bubbleSizeSlider) {
         const size = parseFloat(bubbleSizeSlider.value);
         const scale = size / 5;
         sphere.scale.set(scale, scale, scale);
     }
 
-    // Add direction frustum if heading is available
     if (imgData.heading !== undefined && imgData.heading !== null) {
         const frustum = createCameraFrustum(color);
-
-        // Rotate to match heading (clockwise from North)
-        // Three.js Y rotation is CCW, so we negate the heading
         const headingRad = THREE.MathUtils.degToRad(imgData.heading);
         frustum.rotation.y = -headingRad;
-
         sphere.add(frustum);
     }
 
-    // Add user data for interaction later
     sphere.userData = { ...imgData };
-
     scene.add(sphere);
     points.push(sphere);
 }
 
 function createCameraFrustum(color) {
-    // Frustum dimensions
     const length = 10;
     const width = 6;
     const height = 4.5;
 
     const vertices = [];
-
-    // Origin
     const o = new THREE.Vector3(0, 0, 0);
-
-    // Base corners (facing -Z, which is North/Forward)
     const tl = new THREE.Vector3(-width / 2, height / 2, -length);
     const tr = new THREE.Vector3(width / 2, height / 2, -length);
     const bl = new THREE.Vector3(-width / 2, -height / 2, -length);
     const br = new THREE.Vector3(width / 2, -height / 2, -length);
 
-    // Lines from origin to corners
     vertices.push(o.x, o.y, o.z, tl.x, tl.y, tl.z);
     vertices.push(o.x, o.y, o.z, tr.x, tr.y, tr.z);
     vertices.push(o.x, o.y, o.z, bl.x, bl.y, bl.z);
     vertices.push(o.x, o.y, o.z, br.x, br.y, br.z);
 
-    // Base rectangle
     vertices.push(tl.x, tl.y, tl.z, tr.x, tr.y, tr.z);
     vertices.push(tr.x, tr.y, tr.z, br.x, br.y, br.z);
     vertices.push(br.x, br.y, br.z, bl.x, bl.y, bl.z);
     vertices.push(bl.x, bl.y, bl.z, tl.x, tl.y, tl.z);
 
-    // Top indicator (triangle on top to show "up")
     const topMid = new THREE.Vector3(0, height / 2 + 2, -length);
     vertices.push(tl.x, tl.y, tl.z, topMid.x, topMid.y, topMid.z);
     vertices.push(tr.x, tr.y, tr.z, topMid.x, topMid.y, topMid.z);
 
     const geometry = new THREE.BufferGeometry();
     geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-
-    const material = new THREE.LineBasicMaterial({ color: color });
-
+    const material = new THREE.LineBasicMaterial({ color });
     return new THREE.LineSegments(geometry, material);
 }
 
-function getCenter(images) {
-    let minLat = Infinity, maxLat = -Infinity;
-    let minLng = Infinity, maxLng = -Infinity;
-
-    images.forEach(img => {
-        minLat = Math.min(minLat, img.lat);
-        maxLat = Math.max(maxLat, img.lat);
-        minLng = Math.min(minLng, img.lng);
-        maxLng = Math.max(maxLng, img.lng);
+// =========================================================================
+// 2D coverage map (Leaflet)
+// =========================================================================
+function init2DMap(centerLat, centerLng) {
+    mapContainer.innerHTML = '';
+    if (leafletMap) {
+        leafletMap.remove();
+        leafletMap = null;
+    }
+    leafletMap = L.map(mapContainer, {
+        center: [centerLat, centerLng],
+        zoom: 16,
+        preferCanvas: true,           // crucial for 30k-point performance
+        worldCopyJump: true,
     });
-
-    return {
-        lat: (minLat + maxLat) / 2,
-        lng: (minLng + maxLng) / 2
-    };
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '© OpenStreetMap contributors',
+    }).addTo(leafletMap);
+    leafletMarkers = L.layerGroup().addTo(leafletMap);
 }
 
-// Web Mercator Projection
-const R = 6378137; // Earth radius in meters (WGS84 major axis)
+function add2DPoint(lat, lng, name) {
+    const marker = L.circleMarker([lat, lng], {
+        radius: 3,
+        color: '#38bdf8',
+        fillColor: '#38bdf8',
+        fillOpacity: 0.7,
+        weight: 0,
+    });
+    marker.bindTooltip(name, { direction: 'top', offset: [0, -4] });
+    marker.addTo(leafletMarkers);
+    return marker;
+}
 
-// Clamp latitude before Mercator conversion — Web Mercator is undefined at
-// the poles (atanh(1) → ∞). 85.05112878° is the standard cutoff Google Maps
-// uses; beyond this, the projection explodes to hundreds of millions of metres.
+function buildHeatLayer(points) {
+    if (leafletHeatLayer) {
+        leafletMap.removeLayer(leafletHeatLayer);
+        leafletHeatLayer = null;
+    }
+    if (typeof L.heatLayer !== 'function') return;
+    const data = points.map(p => [p.lat, p.lng, 0.5]);
+    leafletHeatLayer = L.heatLayer(data, {
+        radius: 18,
+        blur: 22,
+        maxZoom: 17,
+        gradient: { 0.2: '#0ea5e9', 0.5: '#22c55e', 0.8: '#facc15', 1.0: '#ef4444' },
+    });
+    if (document.getElementById('heatToggle').checked) {
+        leafletHeatLayer.addTo(leafletMap);
+    }
+}
+
+// =========================================================================
+// Projection helpers (shared by both modes)
+// =========================================================================
+const R = 6378137;
 const MAX_MERCATOR_LAT = 85.05112878;
 
 function latLonToMercator(lat, lon) {
@@ -492,148 +387,38 @@ function latLonToMercator(lat, lon) {
 
 function gpsToCartesian(lat, lng, alt) {
     const mercator = latLonToMercator(lat, lng);
-
-    // Shortest-arc longitude delta — without this, two photos 2 m apart
-    // across the antimeridian project ~40,000 km apart in the scene.
     const twoPiR = 2 * Math.PI * R;
     let dx = mercator.x - window.centerMercator.x;
     if (dx >  twoPiR / 2) dx -= twoPiR;
     if (dx < -twoPiR / 2) dx += twoPiR;
-
-    // Relative to center
-    const x = dx;
-    const z = -(mercator.y - window.centerMercator.y); // Invert Y for 3D Z
-    const y = alt;
-
-    return { x, y, z };
+    return { x: dx, y: alt, z: -(mercator.y - window.centerMercator.y) };
 }
 
-// Map Tile Loading
-async function loadMapTiles(lat, lng) {
-    // Clear existing tiles (dispose geometry, material, AND texture — otherwise
-    // each re-upload leaks ~25 raster textures to the GPU).
-    mapTiles.forEach(tile => {
-        scene.remove(tile);
-        if (tile.geometry) tile.geometry.dispose();
-        if (tile.material) {
-            if (tile.material.map) tile.material.map.dispose();
-            tile.material.dispose();
-        }
+function getCenter(images) {
+    let minLat = Infinity, maxLat = -Infinity;
+    let minLng = Infinity, maxLng = -Infinity;
+    images.forEach(img => {
+        minLat = Math.min(minLat, img.lat);
+        maxLat = Math.max(maxLat, img.lat);
+        minLng = Math.min(minLng, img.lng);
+        maxLng = Math.max(maxLng, img.lng);
     });
-    mapTiles = [];
-
-    // Bump the token so any in-flight tile callbacks from a previous upload
-    // can detect they're stale and dispose their own textures instead of
-    // adding orphan planes to the scene.
-    const myToken = ++tileLoadToken;
-    let failedTiles = 0;
-
-    const zoom = 19; // High zoom for detail
-    const tileX = long2tile(lng, zoom);
-    const tileY = lat2tile(lat, zoom);
-
-    // Load a 5x5 grid centered on the data
-    const radius = 2;
-    const textureLoader = new THREE.TextureLoader();
-    textureLoader.crossOrigin = 'anonymous'; // helps with CORS-tainted canvases
-
-    for (let x = tileX - radius; x <= tileX + radius; x++) {
-        for (let y = tileY - radius; y <= tileY + radius; y++) {
-            const url = `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`;
-
-            // Calculate tile position in 3D space
-            // Tile size in meters at this zoom
-            const tileSizeMeters = (2 * Math.PI * R) / Math.pow(2, zoom); // Earth circumference / 2^zoom
-
-            // Tile center in Mercator coordinates
-            const tileCenterMercatorX = ((x + 0.5) / Math.pow(2, zoom)) * (2 * Math.PI * R) - (Math.PI * R);
-            const tileCenterMercatorY = (Math.PI * R) - ((y + 0.5) / Math.pow(2, zoom)) * (2 * Math.PI * R);
-
-            const posX = tileCenterMercatorX - window.centerMercator.x;
-            const posZ = -(tileCenterMercatorY - window.centerMercator.y);
-
-            // Create the plane first with a fallback colour so the grid
-            // is still visible even if every tile load fails (rate-limit,
-            // offline, etc.). Texture is added asynchronously on success.
-            const geometry = new THREE.PlaneGeometry(tileSizeMeters, tileSizeMeters);
-            const material = new THREE.MeshBasicMaterial({ color: 0x334155 });
-            const plane = new THREE.Mesh(geometry, material);
-
-            plane.rotation.x = -Math.PI / 2; // Rotate to be flat on ground
-            plane.position.set(posX, -0.5, posZ); // Slightly below 0 to avoid z-fighting
-
-            // Check initial toggle state
-            const toggle = document.getElementById('mapToggle');
-            if (toggle) {
-                plane.visible = toggle.checked;
-            }
-
-            scene.add(plane);
-            mapTiles.push(plane);
-
-            textureLoader.load(url,
-                (texture) => {
-                    // Stale-load guard: if another upload has started since
-                    // this load was kicked off, dispose the texture and bail.
-                    if (myToken !== tileLoadToken) {
-                        texture.dispose();
-                        return;
-                    }
-                    material.map = texture;
-                    material.color.set(0xffffff);
-                    material.needsUpdate = true;
-                },
-                undefined,
-                (err) => {
-                    // Don't change the scene; the plane stays as a flat
-                    // dark-slate tile so the grid layout is still readable.
-                    console.warn(`Map tile failed: ${url}`, err?.message || err);
-                    failedTiles++;
-                    if (failedTiles === 1) {
-                        statusDiv.textContent = `Visualized, but some map tiles failed to load (rate limit or offline). Points still placed.`;
-                        statusDiv.style.color = 'var(--text-secondary)';
-                    }
-                }
-            );
-        }
-    }
+    return { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
 }
 
-// Map Toggle Event Listener
-const mapToggle = document.getElementById('mapToggle');
-if (mapToggle) {
-    mapToggle.addEventListener('change', (e) => {
-        const isVisible = e.target.checked;
-        mapTiles.forEach(tile => {
-            tile.visible = isVisible;
-        });
-    });
-}
+function long2tile(lon, zoom) { return Math.floor((lon + 180) / 360 * Math.pow(2, zoom)); }
+function lat2tile(lat, zoom)  { return Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)); }
 
-function long2tile(lon, zoom) {
-    return (Math.floor((lon + 180) / 360 * Math.pow(2, zoom)));
-}
-
-function lat2tile(lat, zoom) {
-    return (Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)));
-}
-
-function isImage(filename) {
-    return /\.(jpg|jpeg|png|heic)$/i.test(filename);
-}
-
+// =========================================================================
+// EXIF
+// =========================================================================
 function getExifData(blob) {
     return new Promise((resolve, reject) => {
         if (typeof EXIF === 'undefined') {
             reject(new Error('exif-js library not loaded'));
             return;
         }
-
-        // Timeout after 2 seconds to prevent hanging
-        const timeoutId = setTimeout(() => {
-            resolve(null);
-        }, 2000);
-
+        const timeoutId = setTimeout(() => resolve(null), 2000);
         try {
             EXIF.getData(blob, function () {
                 clearTimeout(timeoutId);
@@ -643,31 +428,18 @@ function getExifData(blob) {
                 const lngRef = EXIF.getTag(this, "GPSLongitudeRef");
                 const alt = EXIF.getTag(this, "GPSAltitude");
                 const altRef = EXIF.getTag(this, "GPSAltitudeRef");
-
-                // Direction
                 const dir = EXIF.getTag(this, "GPSImgDirection");
-                const dirRef = EXIF.getTag(this, "GPSImgDirectionRef"); // 'T' for True, 'M' for Magnetic
-
                 if (lat && latRef && lng && lngRef) {
-                    const decimalLat = convertDMSToDD(lat, latRef);
-                    const decimalLng = convertDMSToDD(lng, lngRef);
-
                     let altitude = 0;
                     if (alt !== undefined && alt !== null) {
                         altitude = parseFloat(alt);
                         if (altRef === 1) altitude = -altitude;
                     }
-
-                    let heading = null;
-                    if (dir !== undefined && dir !== null) {
-                        heading = parseFloat(dir);
-                    }
-
                     resolve({
-                        lat: decimalLat,
-                        lng: decimalLng,
+                        lat: convertDMSToDD(lat, latRef),
+                        lng: convertDMSToDD(lng, lngRef),
                         alt: altitude,
-                        heading: heading
+                        heading: dir !== undefined && dir !== null ? parseFloat(dir) : null,
                     });
                 } else {
                     resolve(null);
@@ -683,8 +455,410 @@ function getExifData(blob) {
 
 function convertDMSToDD(dms, ref) {
     let dd = dms[0] + dms[1] / 60 + dms[2] / 3600;
-    if (ref === "S" || ref === "W") {
-        dd = dd * -1;
-    }
+    if (ref === "S" || ref === "W") dd = -dd;
     return dd;
 }
+
+// =========================================================================
+// 3D map tiles (Three.js + OSM ground overlay)
+// =========================================================================
+async function loadMapTiles(lat, lng) {
+    mapTiles.forEach(tile => {
+        scene.remove(tile);
+        if (tile.geometry) tile.geometry.dispose();
+        if (tile.material) {
+            if (tile.material.map) tile.material.map.dispose();
+            tile.material.dispose();
+        }
+    });
+    mapTiles = [];
+
+    const myToken = ++tileLoadToken;
+    let failedTiles = 0;
+
+    const zoom = 19;
+    const tileX = long2tile(lng, zoom);
+    const tileY = lat2tile(lat, zoom);
+    const radius = 2;
+    const textureLoader = new THREE.TextureLoader();
+    textureLoader.crossOrigin = 'anonymous';
+
+    for (let x = tileX - radius; x <= tileX + radius; x++) {
+        for (let y = tileY - radius; y <= tileY + radius; y++) {
+            const url = `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`;
+            const tileSizeMeters = (2 * Math.PI * R) / Math.pow(2, zoom);
+            const tileCenterMercatorX = ((x + 0.5) / Math.pow(2, zoom)) * (2 * Math.PI * R) - (Math.PI * R);
+            const tileCenterMercatorY = (Math.PI * R) - ((y + 0.5) / Math.pow(2, zoom)) * (2 * Math.PI * R);
+            const posX = tileCenterMercatorX - window.centerMercator.x;
+            const posZ = -(tileCenterMercatorY - window.centerMercator.y);
+
+            const geometry = new THREE.PlaneGeometry(tileSizeMeters, tileSizeMeters);
+            const material = new THREE.MeshBasicMaterial({ color: 0x334155 });
+            const plane = new THREE.Mesh(geometry, material);
+            plane.rotation.x = -Math.PI / 2;
+            plane.position.set(posX, -0.5, posZ);
+
+            const toggle = document.getElementById('mapToggle');
+            if (toggle) plane.visible = toggle.checked;
+
+            scene.add(plane);
+            mapTiles.push(plane);
+
+            textureLoader.load(url,
+                (texture) => {
+                    if (myToken !== tileLoadToken) { texture.dispose(); return; }
+                    material.map = texture;
+                    material.color.set(0xffffff);
+                    material.needsUpdate = true;
+                },
+                undefined,
+                (err) => {
+                    console.warn(`Map tile failed: ${url}`, err?.message || err);
+                    failedTiles++;
+                    if (failedTiles === 1) {
+                        statusDiv.textContent = `Visualized, but some map tiles failed to load (rate limit or offline). Points still placed.`;
+                        statusDiv.style.color = 'var(--text-secondary)';
+                    }
+                }
+            );
+        }
+    }
+}
+
+// =========================================================================
+// Mode-switching (UI)
+// =========================================================================
+function setMode(mode) {
+    if (mode === currentMode) return;
+    if (mode === MODE_3D) {
+        sceneContainer.style.display = 'block';
+        mapContainer.style.display = 'none';
+        bubbleControls.style.display = '';
+        bubbleColorControl.style.display = '';
+        mapToggleGroup.style.display = '';
+        heatToggleGroup.style.display = 'none';
+        subtitle.textContent = 'Visualize your photo locations in 3D space.';
+    } else {
+        sceneContainer.style.display = 'none';
+        mapContainer.style.display = 'block';
+        bubbleControls.style.display = 'none';
+        bubbleColorControl.style.display = 'none';
+        mapToggleGroup.style.display = 'none';
+        heatToggleGroup.style.display = '';
+        subtitle.textContent = 'Coverage map of geotagged photos (2D mode for large archives).';
+    }
+    currentMode = mode;
+}
+
+// =========================================================================
+// UI controls (3D-only — left wired but hidden in 2D mode)
+// =========================================================================
+const bubbleSizeSlider = document.getElementById('bubbleSize');
+const bubbleSizeValue = document.getElementById('bubbleSizeValue');
+const bubbleColorPicker = document.getElementById('bubbleColor');
+
+if (bubbleSizeSlider && bubbleSizeValue) {
+    bubbleSizeSlider.addEventListener('input', (e) => {
+        const size = parseFloat(e.target.value);
+        bubbleSizeValue.textContent = size;
+        points.forEach(point => {
+            const scale = size / 5;
+            point.scale.set(scale, scale, scale);
+        });
+    });
+}
+
+if (bubbleColorPicker) {
+    bubbleColorPicker.addEventListener('input', (e) => {
+        const color = e.target.value;
+        points.forEach(point => {
+            point.material.color.set(color);
+            const frustum = point.children.find(child => child.type === 'LineSegments');
+            if (frustum) frustum.material.color.set(color);
+        });
+    });
+}
+
+const mapToggle = document.getElementById('mapToggle');
+if (mapToggle) {
+    mapToggle.addEventListener('change', (e) => {
+        const isVisible = e.target.checked;
+        mapTiles.forEach(tile => { tile.visible = isVisible; });
+    });
+}
+
+const heatToggle = document.getElementById('heatToggle');
+if (heatToggle) {
+    heatToggle.addEventListener('change', () => {
+        if (!leafletMap || !leafletHeatLayer) return;
+        if (heatToggle.checked) leafletHeatLayer.addTo(leafletMap);
+        else leafletMap.removeLayer(leafletHeatLayer);
+    });
+}
+
+// =========================================================================
+// File processing pipeline
+// =========================================================================
+
+/**
+ * Decide which mode to render in, based on archive size and entry count.
+ * Done BEFORE the unzip pass so we can warn the user early.
+ */
+function pickMode(file, entryCount) {
+    const sizeMb = file.size / 1024 / 1024;
+    if (entryCount > THREE_D_MAX_PHOTOS || sizeMb > THREE_D_MAX_FILE_MB) {
+        return MODE_2D;
+    }
+    return MODE_3D;
+}
+
+function isImageEntry(name) {
+    if (!name) return false;
+    const lower = name.toLowerCase();
+    if (lower.includes('__macosx')) return false;
+    return /\.(jpg|jpeg|png|heic)$/.test(lower);
+}
+
+/**
+ * Read the file with fflate. fflate's `unzipSync` synchronously decodes the
+ * central directory and lets us pass a `filter` callback that runs on each
+ * entry's metadata BEFORE any bytes are decompressed. Returning `false`
+ * from the filter means the entry is never inflated — exactly what we want
+ * for the videos and junk files that make up 60-80% of a drone dump.
+ *
+ * Returns {entries, stats} where entries is a map of name → Uint8Array
+ * of just the images we kept, and stats has counts.
+ */
+function unzipWithFilter(zipBuffer, maxBytesPerEntry) {
+    const entries = {};
+    const stats = { total: 0, kept: 0, skippedVideo: 0, skippedOversize: 0, skippedOther: 0 };
+
+    const decoded = fflate.unzipSync(new Uint8Array(zipBuffer), {
+        filter: (file) => {
+            stats.total++;
+            if (!isImageEntry(file.name)) {
+                // Skip videos, .DS_Store, sidecar files, etc.
+                if (/\.(mp4|mov|m4v|avi|mkv|lrv|srt)$/i.test(file.name)) {
+                    stats.skippedVideo++;
+                } else {
+                    stats.skippedOther++;
+                }
+                return false;
+            }
+            if (file.originalSize > maxBytesPerEntry) {
+                stats.skippedOversize++;
+                return false;
+            }
+            stats.kept++;
+            return true;
+        },
+    });
+
+    Object.assign(entries, decoded);
+    return { entries, stats };
+}
+
+/**
+ * Async wrapper that yields to the event loop between batches so the UI
+ * can repaint progress text. EXIF parsing of a 30k-photo archive would
+ * otherwise freeze the tab for many seconds.
+ */
+async function extractGpsFromEntries(entries, onProgress) {
+    const names = Object.keys(entries);
+    const total = names.length;
+    const validImages = [];
+    const BATCH = 50;
+    const errors = { noGps: 0, parseFail: 0 };
+
+    for (let i = 0; i < total; i += BATCH) {
+        const batch = names.slice(i, i + BATCH);
+        await Promise.all(batch.map(async (name) => {
+            const bytes = entries[name];
+            const blob = new Blob([bytes], { type: 'image/jpeg' });
+            try {
+                const exif = await getExifData(blob);
+                if (exif && exif.lat !== undefined && exif.lng !== undefined) {
+                    validImages.push({ name, ...exif });
+                } else {
+                    errors.noGps++;
+                }
+            } catch (e) {
+                errors.parseFail++;
+            }
+        }));
+        if (onProgress) onProgress(Math.min(total, i + BATCH), total);
+        // Yield to the event loop so the status text repaints.
+        await new Promise(r => setTimeout(r, 0));
+    }
+
+    return { validImages, errors, total };
+}
+
+function setStatus(text, color) {
+    statusDiv.textContent = text;
+    if (color) statusDiv.style.color = color;
+}
+
+function setProgress(text) {
+    if (progressDiv) progressDiv.textContent = text || '';
+}
+
+// =========================================================================
+// Main entry point
+// =========================================================================
+fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    if (uploadInFlight) {
+        setStatus('Already processing a ZIP, please wait...', 'var(--text-secondary)');
+        return;
+    }
+    uploadInFlight = true;
+
+    setStatus(`Reading ${(file.size / 1024 / 1024).toFixed(1)} MB ZIP…`, 'var(--accent-color)');
+    setProgress('');
+
+    // 5GB on an 8GB-RAM Mac is over V8's per-tab heap cap (~2-4GB). Tell
+    // the user up front instead of letting the tab die silently. A
+    // streamed, EOCD-only path (fflate + File.slice) could handle this
+    // but is a bigger refactor — for now, we surface the cap clearly
+    // and point at chunking.
+    if (file.size > 2 * 1024 * 1024 * 1024) {
+        setStatus(
+            `That ZIP is ${(file.size / 1024 / 1024 / 1024).toFixed(1)} GB — ` +
+            `larger than this tab can hold in memory. Re-zip in chunks ` +
+            `of <2 GB and upload each separately.`,
+            'var(--error-color)'
+        );
+        return;
+    }
+
+    // Step 1: buffer the file. Some browsers invalidate the File handle
+    // once the picker closes, so we read the bytes into RAM first.
+    let zipBuffer;
+    try {
+        zipBuffer = await file.arrayBuffer();
+    } catch (readErr) {
+        console.error('Could not read the selected file:', readErr);
+        setStatus('Could not read the selected file. Try re-selecting it from the file picker.', 'var(--error-color)');
+        uploadInFlight = false;
+        return;
+    }
+
+    // Sanity check
+    const view = new Uint8Array(zipBuffer, 0, 4);
+    if (view.length < 4 || view[0] !== 0x50 || view[1] !== 0x4B ||
+        view[2] !== 0x03 || view[3] !== 0x04) {
+        setStatus('That file does not look like a ZIP archive.', 'var(--error-color)');
+        uploadInFlight = false;
+        return;
+    }
+
+    try {
+        // Step 2: unzip with the filter. The filter runs against metadata
+        // only, so even 5 GB archives are fine — we never inflate videos.
+        setStatus('Indexing ZIP entries…', 'var(--accent-color)');
+        const t0 = performance.now();
+        const { entries, stats } = unzipWithFilter(zipBuffer, MAX_BLOB_BYTES);
+        const unzipMs = (performance.now() - t0).toFixed(0);
+
+        const mode = pickMode(file, stats.kept);
+        setMode(mode);
+
+        if (mode === MODE_2D) {
+            // 2D path: free the raw bytes immediately, we only need lat/lng.
+            zipBuffer = null;
+        }
+
+        const modeLabel = mode === MODE_2D ? '2D coverage map' : '3D scene';
+        setStatus(
+            `Found ${stats.kept} image${stats.kept === 1 ? '' : 's'} ` +
+            `(skipped ${stats.skippedVideo} video${stats.skippedVideo === 1 ? '' : 's'}, ` +
+            `${stats.skippedOversize} oversize, ${stats.skippedOther} other). ` +
+            `Reading EXIF in ${modeLabel}…`,
+            'var(--accent-color)'
+        );
+
+        // Step 3: parse EXIF for each kept image, in batches so the UI
+        // repaints progress text.
+        const { validImages, errors, total } = await extractGpsFromEntries(
+            entries,
+            (done, all) => {
+                setProgress(`EXIF ${done} / ${all} (${Math.round(done / all * 100)}%)`);
+            }
+        );
+        // entries is no longer needed; let GC reclaim it.
+        // (Not strictly necessary in the 3D path either, but explicit is good.)
+        for (const k of Object.keys(entries)) delete entries[k];
+
+        if (validImages.length === 0) {
+            setStatus(
+                `No GPS data found in ${total} images. ` +
+                `${errors.noGps} had no GPS, ${errors.parseFail} failed to parse.`,
+                'var(--error-color)'
+            );
+            setProgress('');
+            return;
+        }
+
+        const center = getCenter(validImages);
+
+        if (mode === MODE_3D) {
+            clear3DScene();
+            window.centerLat = center.lat;
+            window.centerLng = center.lng;
+            window.centerMercator = latLonToMercator(center.lat, center.lng);
+
+            await loadMapTiles(center.lat, center.lng);
+
+            validImages.forEach(img => {
+                const pos = gpsToCartesian(img.lat, img.lng, img.alt);
+                createPoint(pos, img);
+            });
+            fitCameraToSelection();
+
+            setStatus(
+                `Visualized ${validImages.length} images in 3D with map overlay ` +
+                `(unzip ${unzipMs} ms, ${stats.skippedVideo} videos skipped).`,
+                'var(--success-color)'
+            );
+        } else {
+            // 2D path
+            // Free any 3D scene state from a previous upload so we don't
+            // leak GPU resources on mode-switch.
+            if (typeof scene !== 'undefined' && scene) clear3DScene();
+            init2DMap(center.lat, center.lng);
+            validImages.forEach(img => add2DPoint(img.lat, img.lng, img.name));
+            // layerGroup doesn't expose getBounds; build a LatLngBounds from
+            // the markers we just added.
+            const bounds = L.latLngBounds(validImages.map(img => [img.lat, img.lng]));
+            leafletMap.fitBounds(bounds.pad(0.1));
+            buildHeatLayer(validImages);
+
+            setStatus(
+                `Mapped ${validImages.length} photos on the 2D coverage map ` +
+                `(skipped ${stats.skippedVideo} videos, ${stats.skippedOversize} oversize images). ` +
+                `${errors.noGps} had no GPS.`,
+                'var(--success-color)'
+            );
+        }
+        setProgress('');
+
+    } catch (err) {
+        console.error(err);
+        setStatus('Error processing file: ' + err.message, 'var(--error-color)');
+        setProgress('');
+    } finally {
+        uploadInFlight = false;
+    }
+});
+
+// =========================================================================
+// Boot
+// =========================================================================
+(async function boot() {
+    await waitForLibraries();
+    init3DScene();
+    setMode(MODE_3D);
+})();
