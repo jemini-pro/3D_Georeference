@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  syntax:
+    name: JS syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Syntax-check every JS file
+        run: |
+          set -e
+          for f in $(find . -name '*.js' -not -path './node_modules/*'); do
+            echo "checking $f"
+            node --check "$f"
+          done
+
+      - name: Verify required files exist
+        run: |
+          test -f index.html || (echo "missing index.html" && exit 1)
+          test -f script.js || (echo "missing script.js" && exit 1)
+          test -f style.css || (echo "missing style.css" && exit 1)
+          test -f README.md || (echo "missing README.md" && exit 1)
+          test -f LICENSE  || (echo "missing LICENSE"  && exit 1)
+
+  pages:
+    name: GitHub Pages deploy check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v4
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+      - id: deployment
+        uses: actions/deploy-pages@v4

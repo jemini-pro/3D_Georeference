@@ -1,0 +1,24 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+
+# Editor configs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Node (in case anyone adds tooling later)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local test fixtures — keep the repo light
+test_photos.zip
+*.tmp.zip
+
+# Build output (none today, but here for the future)
+dist/
+build/
+.cache/

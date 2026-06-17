@@ -10,6 +10,8 @@ window.onerror = function (message, source, lineno, colno, error) {
 let scene, camera, renderer, controls;
 let points = [];
 let mapTiles = []; // Store map tiles to toggle visibility
+let uploadInFlight = false; // Single-flight guard so two rapid picks don't race
+let tileLoadToken = 0; // Monotonic; stale tile callbacks detect themselves with this
 const fileInput = document.getElementById('fileInput');
 const statusDiv = document.getElementById('status');
 const sceneContainer = document.getElementById('scene-container');
@@ -166,15 +168,59 @@ fileInput.addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
+    // Don't start a second ZIP read while the first one is still in flight;
+    // otherwise two parallel forEach loops walk the ZIPs and the second set
+    // of map-tile callbacks can clobber the first.
+    if (uploadInFlight) {
+        statusDiv.textContent = 'Already processing a ZIP, please wait...';
+        statusDiv.style.color = 'var(--text-secondary)';
+        return;
+    }
+    uploadInFlight = true;
+
     statusDiv.textContent = 'Processing ZIP file...';
     statusDiv.style.color = 'var(--accent-color)';
 
+    // Buffer the file into memory FIRST, before any other async work.
+    // Some browsers (Safari, older Chromium) invalidate the File handle once
+    // the picker closes or focus changes; if we hand the live File straight
+    // to JSZip, lazy reads later can throw a cryptic "could not be read"
+    // permission error. Reading into ArrayBuffer decouples us from the handle.
+    let zipBuffer;
+    try {
+        zipBuffer = await file.arrayBuffer();
+    } catch (readErr) {
+        console.error('Could not read the selected file:', readErr);
+        statusDiv.textContent = 'Could not read the selected file. Try re-selecting it from the file picker.';
+        statusDiv.style.color = 'var(--error-color)';
+        return;
+    }
+
+    // Sanity-check the ZIP magic bytes (PK\x03\x04) before handing to JSZip so
+    // the user gets a clear "not a ZIP" message instead of a JSZip stack trace.
+    const view = new Uint8Array(zipBuffer, 0, 4);
+    if (view.length < 4 || view[0] !== 0x50 || view[1] !== 0x4B ||
+        view[2] !== 0x03 || view[3] !== 0x04) {
+        statusDiv.textContent = 'That file does not look like a ZIP archive.';
+        statusDiv.style.color = 'var(--error-color)';
+        return;
+    }
+
     try {
         const zip = new JSZip();
-        const contents = await zip.loadAsync(file);
+        const contents = await zip.loadAsync(zipBuffer);
 
-        // Clear existing points
-        points.forEach(p => scene.remove(p));
+        // Clear existing points (dispose GPU resources to avoid leaks on re-upload)
+        points.forEach(p => {
+            scene.remove(p);
+            p.traverse(obj => {
+                if (obj.geometry) obj.geometry.dispose();
+                if (obj.material) {
+                    if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
+                    else obj.material.dispose();
+                }
+            });
+        });
         points = [];
 
         const imagePromises = [];
@@ -246,6 +292,8 @@ fileInput.addEventListener('change', async (e) => {
         console.error(err);
         statusDiv.textContent = 'Error processing file: ' + err.message;
         statusDiv.style.color = 'var(--error-color)';
+    } finally {
+        uploadInFlight = false;
     }
 });
 
@@ -430,17 +478,30 @@ function getCenter(images) {
 // Web Mercator Projection
 const R = 6378137; // Earth radius in meters (WGS84 major axis)
 
+// Clamp latitude before Mercator conversion — Web Mercator is undefined at
+// the poles (atanh(1) → ∞). 85.05112878° is the standard cutoff Google Maps
+// uses; beyond this, the projection explodes to hundreds of millions of metres.
+const MAX_MERCATOR_LAT = 85.05112878;
+
 function latLonToMercator(lat, lon) {
+    const clampedLat = Math.max(-MAX_MERCATOR_LAT, Math.min(MAX_MERCATOR_LAT, lat));
     const x = R * THREE.MathUtils.degToRad(lon);
-    const y = R * Math.log(Math.tan(Math.PI / 4 + THREE.MathUtils.degToRad(lat) / 2));
+    const y = R * Math.log(Math.tan(Math.PI / 4 + THREE.MathUtils.degToRad(clampedLat) / 2));
     return { x, y };
 }
 
 function gpsToCartesian(lat, lng, alt) {
     const mercator = latLonToMercator(lat, lng);
 
+    // Shortest-arc longitude delta — without this, two photos 2 m apart
+    // across the antimeridian project ~40,000 km apart in the scene.
+    const twoPiR = 2 * Math.PI * R;
+    let dx = mercator.x - window.centerMercator.x;
+    if (dx >  twoPiR / 2) dx -= twoPiR;
+    if (dx < -twoPiR / 2) dx += twoPiR;
+
     // Relative to center
-    const x = mercator.x - window.centerMercator.x;
+    const x = dx;
     const z = -(mercator.y - window.centerMercator.y); // Invert Y for 3D Z
     const y = alt;
 
@@ -449,17 +510,32 @@ function gpsToCartesian(lat, lng, alt) {
 
 // Map Tile Loading
 async function loadMapTiles(lat, lng) {
-    // Clear existing tiles
-    mapTiles.forEach(tile => scene.remove(tile));
+    // Clear existing tiles (dispose geometry, material, AND texture — otherwise
+    // each re-upload leaks ~25 raster textures to the GPU).
+    mapTiles.forEach(tile => {
+        scene.remove(tile);
+        if (tile.geometry) tile.geometry.dispose();
+        if (tile.material) {
+            if (tile.material.map) tile.material.map.dispose();
+            tile.material.dispose();
+        }
+    });
     mapTiles = [];
+
+    // Bump the token so any in-flight tile callbacks from a previous upload
+    // can detect they're stale and dispose their own textures instead of
+    // adding orphan planes to the scene.
+    const myToken = ++tileLoadToken;
+    let failedTiles = 0;
 
     const zoom = 19; // High zoom for detail
     const tileX = long2tile(lng, zoom);
     const tileY = lat2tile(lat, zoom);
 
-    // Load a 3x3 grid centered on the data
+    // Load a 5x5 grid centered on the data
     const radius = 2;
     const textureLoader = new THREE.TextureLoader();
+    textureLoader.crossOrigin = 'anonymous'; // helps with CORS-tainted canvases
 
     for (let x = tileX - radius; x <= tileX + radius; x++) {
         for (let y = tileY - radius; y <= tileY + radius; y++) {
@@ -476,23 +552,49 @@ async function loadMapTiles(lat, lng) {
             const posX = tileCenterMercatorX - window.centerMercator.x;
             const posZ = -(tileCenterMercatorY - window.centerMercator.y);
 
-            textureLoader.load(url, (texture) => {
-                const geometry = new THREE.PlaneGeometry(tileSizeMeters, tileSizeMeters);
-                const material = new THREE.MeshBasicMaterial({ map: texture });
-                const plane = new THREE.Mesh(geometry, material);
+            // Create the plane first with a fallback colour so the grid
+            // is still visible even if every tile load fails (rate-limit,
+            // offline, etc.). Texture is added asynchronously on success.
+            const geometry = new THREE.PlaneGeometry(tileSizeMeters, tileSizeMeters);
+            const material = new THREE.MeshBasicMaterial({ color: 0x334155 });
+            const plane = new THREE.Mesh(geometry, material);
 
-                plane.rotation.x = -Math.PI / 2; // Rotate to be flat on ground
-                plane.position.set(posX, -0.5, posZ); // Slightly below 0 to avoid z-fighting
+            plane.rotation.x = -Math.PI / 2; // Rotate to be flat on ground
+            plane.position.set(posX, -0.5, posZ); // Slightly below 0 to avoid z-fighting
 
-                // Check initial toggle state
-                const toggle = document.getElementById('mapToggle');
-                if (toggle) {
-                    plane.visible = toggle.checked;
+            // Check initial toggle state
+            const toggle = document.getElementById('mapToggle');
+            if (toggle) {
+                plane.visible = toggle.checked;
+            }
+
+            scene.add(plane);
+            mapTiles.push(plane);
+
+            textureLoader.load(url,
+                (texture) => {
+                    // Stale-load guard: if another upload has started since
+                    // this load was kicked off, dispose the texture and bail.
+                    if (myToken !== tileLoadToken) {
+                        texture.dispose();
+                        return;
+                    }
+                    material.map = texture;
+                    material.color.set(0xffffff);
+                    material.needsUpdate = true;
+                },
+                undefined,
+                (err) => {
+                    // Don't change the scene; the plane stays as a flat
+                    // dark-slate tile so the grid layout is still readable.
+                    console.warn(`Map tile failed: ${url}`, err?.message || err);
+                    failedTiles++;
+                    if (failedTiles === 1) {
+                        statusDiv.textContent = `Visualized, but some map tiles failed to load (rate limit or offline). Points still placed.`;
+                        statusDiv.style.color = 'var(--text-secondary)';
+                    }
                 }
-
-                scene.add(plane);
-                mapTiles.push(plane);
-            });
+            );
         }
     }
 }
