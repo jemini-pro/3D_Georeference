@@ -26,10 +26,14 @@ jobs:
             node --check "$f"
           done
 
+      - name: Run tests
+        run: node --test
+
       - name: Verify required files exist
         run: |
           test -f index.html || (echo "missing index.html" && exit 1)
           test -f script.js || (echo "missing script.js" && exit 1)
+          test -f projection.js || (echo "missing projection.js" && exit 1)
           test -f style.css || (echo "missing style.css" && exit 1)
           test -f README.md || (echo "missing README.md" && exit 1)
           test -f LICENSE  || (echo "missing LICENSE"  && exit 1)

@@ -19,6 +19,10 @@
          so we can skip videos / oversized files during decompression. -->
     <script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js" defer></script>
 
+    <!-- projection.js: pure coordinate math, no dependencies. Must load
+         before script.js, which binds to it. -->
+    <script src="projection.js" defer></script>
+
     <!-- exif-js: still needed for EXIF GPS parsing (fflate just gives us bytes) -->
     <script src="https://cdn.jsdelivr.net/npm/exif-js" defer></script>
 

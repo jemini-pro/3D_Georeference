@@ -79,6 +79,7 @@ function waitForLibraries() {
         const check = () => {
             if (typeof fflate !== 'undefined'
              && typeof EXIF !== 'undefined'
+             && typeof Projection !== 'undefined'
              && typeof THREE !== 'undefined'
              && typeof THREE.OrbitControls === 'function') {
                 resolve();
@@ -374,40 +375,21 @@ function buildHeatLayer(points) {
 
 // =========================================================================
 // Projection helpers (shared by both modes)
+//
+// The math lives in projection.js so it can be unit-tested outside the
+// browser. Everything below is a thin binding to that module; do not
+// re-implement it here.
 // =========================================================================
-const R = 6378137;
-const MAX_MERCATOR_LAT = 85.05112878;
+const latLonToMercator = Projection.latLonToMercator;
+const getDatasetCentroid = Projection.getDatasetCentroid;
+const long2tile = Projection.long2tile;
+const lat2tile = Projection.lat2tile;
 
-function latLonToMercator(lat, lon) {
-    const clampedLat = Math.max(-MAX_MERCATOR_LAT, Math.min(MAX_MERCATOR_LAT, lat));
-    const x = R * THREE.MathUtils.degToRad(lon);
-    const y = R * Math.log(Math.tan(Math.PI / 4 + THREE.MathUtils.degToRad(clampedLat) / 2));
-    return { x, y };
-}
-
+/** Scene-space position of a photo. The centre is read from `window` here
+ *  so the module itself stays global-free and testable. */
 function gpsToCartesian(lat, lng, alt) {
-    const mercator = latLonToMercator(lat, lng);
-    const twoPiR = 2 * Math.PI * R;
-    let dx = mercator.x - window.centerMercator.x;
-    if (dx >  twoPiR / 2) dx -= twoPiR;
-    if (dx < -twoPiR / 2) dx += twoPiR;
-    return { x: dx, y: alt, z: -(mercator.y - window.centerMercator.y) };
+    return Projection.gpsToCartesian(lat, lng, alt, window.centerMercator);
 }
-
-function getCenter(images) {
-    let minLat = Infinity, maxLat = -Infinity;
-    let minLng = Infinity, maxLng = -Infinity;
-    images.forEach(img => {
-        minLat = Math.min(minLat, img.lat);
-        maxLat = Math.max(maxLat, img.lat);
-        minLng = Math.min(minLng, img.lng);
-        maxLng = Math.max(maxLng, img.lng);
-    });
-    return { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
-}
-
-function long2tile(lon, zoom) { return Math.floor((lon + 180) / 360 * Math.pow(2, zoom)); }
-function lat2tile(lat, zoom)  { return Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)); }
 
 // =========================================================================
 // EXIF
@@ -486,11 +468,10 @@ async function loadMapTiles(lat, lng) {
     for (let x = tileX - radius; x <= tileX + radius; x++) {
         for (let y = tileY - radius; y <= tileY + radius; y++) {
             const url = `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`;
-            const tileSizeMeters = (2 * Math.PI * R) / Math.pow(2, zoom);
-            const tileCenterMercatorX = ((x + 0.5) / Math.pow(2, zoom)) * (2 * Math.PI * R) - (Math.PI * R);
-            const tileCenterMercatorY = (Math.PI * R) - ((y + 0.5) / Math.pow(2, zoom)) * (2 * Math.PI * R);
-            const posX = tileCenterMercatorX - window.centerMercator.x;
-            const posZ = -(tileCenterMercatorY - window.centerMercator.y);
+            const tileSizeMeters = Projection.tileSizeMeters(zoom);
+            const tileCenter = Projection.tileMercatorCenter(x, y, zoom);
+            const posX = tileCenter.x - window.centerMercator.x;
+            const posZ = -(tileCenter.y - window.centerMercator.y);
 
             const geometry = new THREE.PlaneGeometry(tileSizeMeters, tileSizeMeters);
             const material = new THREE.MeshBasicMaterial({ color: 0x334155 });
@@ -802,7 +783,7 @@ fileInput.addEventListener('change', async (e) => {
             return;
         }
 
-        const center = getCenter(validImages);
+        const center = getDatasetCentroid(validImages);
 
         if (mode === MODE_3D) {
             clear3DScene();
