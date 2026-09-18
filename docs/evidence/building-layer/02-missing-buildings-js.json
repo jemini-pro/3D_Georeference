@@ -1,0 +1,11 @@
+{
+  "state": {
+    "booted": true,
+    "points": 3,
+    "buildings": 0,
+    "status": "Visualized 3 images in 3D with map overlay (unzip 1 ms, 0 videos skipped)."
+  },
+  "logs": [
+    "error: Failed to load resource: net::ERR_FAILED"
+  ]
+}

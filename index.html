@@ -19,6 +19,14 @@
          so we can skip videos / oversized files during decompression. -->
     <script src="https://cdn.jsdelivr.net/npm/fflate@0.8.2/umd/index.js" defer></script>
 
+    <!-- projection.js: pure coordinate math, no dependencies. Must load
+         before script.js, which binds to it. -->
+    <script src="projection.js" defer></script>
+
+    <!-- buildings.js: parses OSM Overpass geometry into extrudable shapes.
+         Depends on projection.js; must load before script.js. -->
+    <script src="buildings.js" defer></script>
+
     <!-- exif-js: still needed for EXIF GPS parsing (fflate just gives us bytes) -->
     <script src="https://cdn.jsdelivr.net/npm/exif-js" defer></script>
 
@@ -78,6 +86,15 @@
                     </label>
                 </div>
             </div>
+
+            <!-- Attribution is a licence condition for both the ground tiles
+                 and the Building Layer, both derived from OpenStreetMap under
+                 ODbL. It must stay visible in both modes and must NOT be tied
+                 to the map or buildings toggles — switching a layer off does
+                 not un-derive the data. -->
+            <p class="attribution" id="attribution">
+                &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a> contributors
+            </p>
         </div>
         <div id="scene-container"></div>
         <div id="map-container"></div>

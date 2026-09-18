@@ -41,10 +41,7 @@ body {
     flex-direction: column;
     gap: 2rem;
     z-index: 10;
-    overflow-y: auto;
-    /* Scrollbar styling */
-    scrollbar-width: thin;
-    scrollbar-color: var(--glass-border) transparent;
+    overflow: hidden;
 }
 
 .glass-panel {
@@ -60,6 +57,7 @@ header {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    flex-shrink: 0;
 }
 
 header h1 {
@@ -80,6 +78,11 @@ header p {
     display: flex;
     flex-direction: column;
     gap: 1.5rem;
+    min-height: 0;
+    overflow-y: auto;
+    /* Scrollbar styling */
+    scrollbar-width: thin;
+    scrollbar-color: var(--glass-border) transparent;
 }
 
 .input-group {
@@ -191,6 +194,31 @@ input[type="file"]::file-selector-button:hover {
     color: var(--text-secondary);
     margin-top: 0.25rem;
     min-height: 1em;
+}
+
+/* OpenStreetMap attribution. A licence condition for the ground tiles and
+   the Building Layer, so it is always visible and never tied to a toggle.
+   The sidebar is a flex column whose controls scroll (see .controls); this
+   sits below them as a pinned footer, so it stays on screen without ever
+   covering a control — which matters on a narrow viewport where the
+   sidebar collapses to a capped bottom sheet. */
+.attribution {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    opacity: 0.75;
+    flex-shrink: 0;
+    margin-top: auto;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--glass-border);
+}
+
+.attribution a {
+    color: var(--accent-color);
+    text-decoration: none;
+}
+
+.attribution a:hover {
+    text-decoration: underline;
 }
 
 /* Checkbox Styles */

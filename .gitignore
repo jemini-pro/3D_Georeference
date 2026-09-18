@@ -18,6 +18,9 @@ yarn-error.log*
 test_photos.zip
 *.tmp.zip
 
+# Playwright MCP scratch output
+.playwright-mcp/
+
 # Build output (none today, but here for the future)
 dist/
 build/

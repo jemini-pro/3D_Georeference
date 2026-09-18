@@ -49,8 +49,10 @@ const MAX_BLOB_BYTES = 25 * 1024 * 1024;
 let scene, camera, renderer, controls;
 let points = [];
 let mapTiles = [];
+let buildings = [];              // Building meshes currently in the scene
 let uploadInFlight = false;
 let tileLoadToken = 0;
+let buildingLoadToken = 0;       // monotonic, so stale fetches dispose themselves
 let currentMode = null; // MODE_3D or MODE_2D
 let leafletMap = null;
 let leafletMarkers = null;       // L.layerGroup for the dots
@@ -79,6 +81,7 @@ function waitForLibraries() {
         const check = () => {
             if (typeof fflate !== 'undefined'
              && typeof EXIF !== 'undefined'
+             && typeof Projection !== 'undefined'
              && typeof THREE !== 'undefined'
              && typeof THREE.OrbitControls === 'function') {
                 resolve();
@@ -218,10 +221,7 @@ function clear3DScene() {
         scene.remove(p);
         p.traverse(obj => {
             if (obj.geometry) obj.geometry.dispose();
-            if (obj.material) {
-                if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
-                else obj.material.dispose();
-            }
+            disposeMaterials(obj.material);
         });
     });
     points = [];
@@ -229,12 +229,19 @@ function clear3DScene() {
     mapTiles.forEach(tile => {
         scene.remove(tile);
         if (tile.geometry) tile.geometry.dispose();
-        if (tile.material) {
-            if (tile.material.map) tile.material.map.dispose();
-            tile.material.dispose();
-        }
+        if (tile.material && tile.material.map) tile.material.map.dispose();
+        disposeMaterials(tile.material);
     });
     mapTiles = [];
+
+    clearBuildings();
+}
+
+/** Dispose one material or an array of them (ExtrudeGeometry uses two). */
+function disposeMaterials(material) {
+    if (!material) return;
+    if (Array.isArray(material)) material.forEach(m => m.dispose());
+    else material.dispose();
 }
 
 function fitCameraToSelection() {
@@ -374,40 +381,21 @@ function buildHeatLayer(points) {
 
 // =========================================================================
 // Projection helpers (shared by both modes)
+//
+// The math lives in projection.js so it can be unit-tested outside the
+// browser. Everything below is a thin binding to that module; do not
+// re-implement it here.
 // =========================================================================
-const R = 6378137;
-const MAX_MERCATOR_LAT = 85.05112878;
+const latLonToMercator = Projection.latLonToMercator;
+const getDatasetCentroid = Projection.getDatasetCentroid;
+const long2tile = Projection.long2tile;
+const lat2tile = Projection.lat2tile;
 
-function latLonToMercator(lat, lon) {
-    const clampedLat = Math.max(-MAX_MERCATOR_LAT, Math.min(MAX_MERCATOR_LAT, lat));
-    const x = R * THREE.MathUtils.degToRad(lon);
-    const y = R * Math.log(Math.tan(Math.PI / 4 + THREE.MathUtils.degToRad(clampedLat) / 2));
-    return { x, y };
-}
-
+/** Scene-space position of a photo. The centre is read from `window` here
+ *  so the module itself stays global-free and testable. */
 function gpsToCartesian(lat, lng, alt) {
-    const mercator = latLonToMercator(lat, lng);
-    const twoPiR = 2 * Math.PI * R;
-    let dx = mercator.x - window.centerMercator.x;
-    if (dx >  twoPiR / 2) dx -= twoPiR;
-    if (dx < -twoPiR / 2) dx += twoPiR;
-    return { x: dx, y: alt, z: -(mercator.y - window.centerMercator.y) };
+    return Projection.gpsToCartesian(lat, lng, alt, window.centerMercator);
 }
-
-function getCenter(images) {
-    let minLat = Infinity, maxLat = -Infinity;
-    let minLng = Infinity, maxLng = -Infinity;
-    images.forEach(img => {
-        minLat = Math.min(minLat, img.lat);
-        maxLat = Math.max(maxLat, img.lat);
-        minLng = Math.min(minLng, img.lng);
-        maxLng = Math.max(maxLng, img.lng);
-    });
-    return { lat: (minLat + maxLat) / 2, lng: (minLng + maxLng) / 2 };
-}
-
-function long2tile(lon, zoom) { return Math.floor((lon + 180) / 360 * Math.pow(2, zoom)); }
-function lat2tile(lat, zoom)  { return Math.floor((1 - Math.log(Math.tan(lat * Math.PI / 180) + 1 / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, zoom)); }
 
 // =========================================================================
 // EXIF
@@ -466,10 +454,8 @@ async function loadMapTiles(lat, lng) {
     mapTiles.forEach(tile => {
         scene.remove(tile);
         if (tile.geometry) tile.geometry.dispose();
-        if (tile.material) {
-            if (tile.material.map) tile.material.map.dispose();
-            tile.material.dispose();
-        }
+        if (tile.material && tile.material.map) tile.material.map.dispose();
+        disposeMaterials(tile.material);
     });
     mapTiles = [];
 
@@ -486,11 +472,10 @@ async function loadMapTiles(lat, lng) {
     for (let x = tileX - radius; x <= tileX + radius; x++) {
         for (let y = tileY - radius; y <= tileY + radius; y++) {
             const url = `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`;
-            const tileSizeMeters = (2 * Math.PI * R) / Math.pow(2, zoom);
-            const tileCenterMercatorX = ((x + 0.5) / Math.pow(2, zoom)) * (2 * Math.PI * R) - (Math.PI * R);
-            const tileCenterMercatorY = (Math.PI * R) - ((y + 0.5) / Math.pow(2, zoom)) * (2 * Math.PI * R);
-            const posX = tileCenterMercatorX - window.centerMercator.x;
-            const posZ = -(tileCenterMercatorY - window.centerMercator.y);
+            const tileSizeMeters = Projection.tileSizeMeters(zoom);
+            const tileCenter = Projection.tileMercatorCenter(x, y, zoom);
+            const posX = tileCenter.x - window.centerMercator.x;
+            const posZ = -(tileCenter.y - window.centerMercator.y);
 
             const geometry = new THREE.PlaneGeometry(tileSizeMeters, tileSizeMeters);
             const material = new THREE.MeshBasicMaterial({ color: 0x334155 });
@@ -523,6 +508,145 @@ async function loadMapTiles(lat, lng) {
             );
         }
     }
+}
+
+// =========================================================================
+// Building Layer — OpenStreetMap context geometry
+//
+// Buildings are context, not content: this path never blocks an upload and
+// degrades to the flat ground plane if anything goes wrong. See
+// docs/adr/0004.
+//
+// Overpass is a shared community resource with a usage policy, not a tile
+// server, so we make ONE small-bbox query per upload — never per photo and
+// never per camera move.
+//
+// Robustness beyond "don't block, don't break the upload" — caching, a
+// mirror fallback, and a building cap — is deliberately left to a later
+// ticket. This is the tracer bullet.
+// =========================================================================
+const BUILDING_QUERY_RADIUS_M = 300;   // clears the 5x5 z19 tile patch's half-diagonal of
+                                       // about 270 m, so buildings at the visible corners
+                                       // are already loaded rather than popping in
+const OVERPASS_ENDPOINT = 'https://overpass-api.de/api/interpreter';
+
+// Facade and roof colours. ExtrudeGeometry emits its lid (top/bottom) as
+// material group 0 and its walls as group 1, so a two-material array gives
+// the distinct roof that makes buildings read as volumes.
+const BUILDING_FACADE_COLOR = 0x64748b;
+const BUILDING_ROOF_COLOR = 0x475569;
+
+/**
+ * A metric box around the Dataset Centroid -> the lat/lon box Overpass wants.
+ * Longitude degrees per metre widen by 1/cos(lat), which matters at high
+ * latitudes or the box comes out too narrow.
+ */
+function buildingBBox(centerMercator, radiusM) {
+    const nw = Projection.mercatorToLatLon(centerMercator.x - radiusM, centerMercator.y + radiusM);
+    const se = Projection.mercatorToLatLon(centerMercator.x + radiusM, centerMercator.y - radiusM);
+    return { south: se.lat, west: nw.lon, north: nw.lat, east: se.lon };
+}
+
+function buildOverpassQuery(bbox) {
+    const b = `${bbox.south},${bbox.west},${bbox.north},${bbox.east}`;
+    // Ways cover the vast majority of buildings. Relations are included
+    // because a courtyard building is a multipolygon, and filling one in
+    // would be a silently wrong shape rather than a missing building.
+    // `out geom;` inlines coordinates for both, so no second round trip.
+    return [
+        '[out:json][timeout:20];',
+        '(',
+        `way["building"](${b});`,
+        `relation["building"]["type"="multipolygon"](${b});`,
+        ');',
+        'out geom;',
+    ].join('');
+}
+
+function createBuildingMesh(building) {
+    const shape = new THREE.Shape(
+        building.outer.map(p => new THREE.Vector2(p.x, p.y))
+    );
+    building.holes.forEach(hole => {
+        shape.holes.push(new THREE.Path(hole.map(p => new THREE.Vector2(p.x, p.y))));
+    });
+
+    const geometry = new THREE.ExtrudeGeometry(shape, {
+        depth: building.height,
+        bevelEnabled: false,
+    });
+
+    // ExtrudeGeometry extrudes along +Z; rotating -PI/2 about X turns that
+    // into scene up (+Y), and maps shape y to scene -z, which matches the
+    // convention gpsToCartesian uses. Getting this sign wrong mirrors the
+    // buildings north-to-south against the tiles.
+    geometry.rotateX(-Math.PI / 2);
+
+    // Group 0 is the extruded lid, group 1 the walls.
+    const materials = [
+        new THREE.MeshStandardMaterial({ color: BUILDING_ROOF_COLOR, roughness: 0.9, metalness: 0.0 }),
+        new THREE.MeshStandardMaterial({ color: BUILDING_FACADE_COLOR, roughness: 0.85, metalness: 0.0 }),
+    ];
+    const mesh = new THREE.Mesh(geometry, materials);
+    mesh.userData = { osmId: building.osmId, height: building.height, isBuilding: true };
+    return mesh;
+}
+
+function clearBuildings() {
+    buildings.forEach(b => {
+        scene.remove(b);
+        if (b.geometry) b.geometry.dispose();
+        disposeMaterials(b.material);
+    });
+    buildings = [];
+}
+
+/**
+ * Fetch and render buildings for the current upload.
+ *
+ * Called after the photos are on screen and deliberately NOT awaited: a slow
+ * or failed Overpass request must not delay or fail the upload. `token`
+ * guards against a previous upload's slower fetch landing on top of the
+ * current scene.
+ *
+ * Reads the Dataset Centroid the upload flow has already published to
+ * `window`, rather than taking it as a parameter — the scene and the photos
+ * were placed against that same centroid, and buildings must agree with them.
+ */
+async function loadBuildings() {
+    // A missing buildings.js must never hang or fail the upload. It is the
+    // only script the boot sequence does not wait for (docs/adr/0004).
+    if (typeof Buildings === 'undefined') return;
+
+    const myToken = ++buildingLoadToken;
+    const centerMercator = window.centerMercator;
+    const bbox = buildingBBox(centerMercator, BUILDING_QUERY_RADIUS_M);
+    const query = buildOverpassQuery(bbox);
+
+    let json;
+    try {
+        const response = await fetch(OVERPASS_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'data=' + encodeURIComponent(query),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        json = await response.json();
+    } catch (err) {
+        console.warn('Building Layer unavailable; continuing without buildings.', err?.message || err);
+        return;
+    }
+
+    if (myToken !== buildingLoadToken) return;
+
+    const shapes = Buildings.buildBuildingShapes(json, centerMercator, window.centerLat);
+
+    clearBuildings();
+    shapes.forEach(shape => {
+        const mesh = createBuildingMesh(shape);
+        scene.add(mesh);
+        buildings.push(mesh);
+    });
 }
 
 // =========================================================================
@@ -802,7 +926,7 @@ fileInput.addEventListener('change', async (e) => {
             return;
         }
 
-        const center = getCenter(validImages);
+        const center = getDatasetCentroid(validImages);
 
         if (mode === MODE_3D) {
             clear3DScene();
@@ -823,6 +947,11 @@ fileInput.addEventListener('change', async (e) => {
                 `(unzip ${unzipMs} ms, ${stats.skippedVideo} videos skipped).`,
                 'var(--success-color)'
             );
+
+            // Deliberately not awaited: buildings are context, and a slow or
+            // failing Overpass request must not delay the photos the user is
+            // already looking at (docs/adr/0004).
+            loadBuildings();
         } else {
             // 2D path
             // Free any 3D scene state from a previous upload so we don't
