@@ -1,0 +1,21 @@
+{
+  "attempt": 1,
+  "state": {
+    "buildings": 37,
+    "points": 3,
+    "tiles": 25,
+    "status": "Visualized 3 images in 3D with map overlay (unzip 1 ms, 0 videos skipped).",
+    "attributionVisible": true
+  },
+  "afterToggle": {
+    "attributionVisible": true,
+    "tiles": 25,
+    "buildings": 37
+  },
+  "logs": [
+    "warning: [.WebGL-0x10c00438a00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+    "warning: [.WebGL-0x10c00438a00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+    "warning: [.WebGL-0x10c00438a00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+    "warning: [.WebGL-0x10c00438a00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels (this message will no longer repeat)"
+  ]
+}

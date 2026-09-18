@@ -1,0 +1,12 @@
+{
+  "state": {
+    "points": 3,
+    "buildings": 0,
+    "status": "Visualized 3 images in 3D with map overlay (unzip 1 ms, 0 videos skipped).",
+    "statusColor": "rgb(34, 197, 94)"
+  },
+  "logs": [
+    "error: Failed to load resource: net::ERR_FAILED",
+    "warning: Building Layer unavailable; continuing without buildings. Failed to fetch"
+  ]
+}
