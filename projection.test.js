@@ -153,6 +153,17 @@ test('gpsToCartesian is relative: shifting the centre shifts the result', () => 
     assert.notEqual(fromA.x.toFixed(3), fromB.x.toFixed(3));
 });
 
+test('gpsToCartesian scales horizontal offsets about the centre', () => {
+    // The scene-frame scale (ADR-0005): every horizontal offset shrinks by
+    // the same factor about the origin, and altitude is untouched.
+    const center = P.latLonToMercator(51.5, -0.12);
+    const scaled = P.gpsToCartesian(51.501, -0.119, 123.4, center, 0.5);
+    const unscaled = P.gpsToCartesian(51.501, -0.119, 123.4, center, 1);
+    closeTo(scaled.x, unscaled.x * 0.5, 1e-9);
+    closeTo(scaled.z, unscaled.z * 0.5, 1e-9);
+    assert.equal(scaled.y, 123.4, 'altitude must not be scaled');
+});
+
 // -------------------------------------------------------------------------
 // getDatasetCentroid
 // -------------------------------------------------------------------------
@@ -229,6 +240,49 @@ test('tileMercatorCenter of tile 0,0 at zoom 1 is the north-west quadrant centre
 });
 
 // -------------------------------------------------------------------------
+// tileSceneGeometry — the tile half of the ADR-0005 frame scale
+// -------------------------------------------------------------------------
+test('tileSceneGeometry returns the tile centred on the centroid, unscaled by default', () => {
+    const center = P.latLonToMercator(51.5007, -0.1246);
+    const x = P.long2tile(-0.1246, 19);
+    const y = P.lat2tile(51.5007, 19);
+    const out = P.tileSceneGeometry(x, y, 19, center);
+
+    closeTo(out.width, 76.43702828517625, 1e-9, 'z19 tile edge, unscaled');
+    closeTo(out.height, 76.43702828517625, 1e-9);
+
+    const mc = P.tileMercatorCenter(x, y, 19);
+    closeTo(out.x, mc.x - center.x, 1e-6);
+    closeTo(out.z, -(mc.y - center.y), 1e-6);
+});
+
+test('tileSceneGeometry scales the tile about the centroid', () => {
+    // The frame scale shrinks both the tile's extent and its offset from the
+    // centroid, so a patch stays glued to the ground it covers.
+    const center = P.latLonToMercator(51.5, -0.12);
+    const x = P.long2tile(-0.12, 19);
+    const y = P.lat2tile(51.5, 19);
+    const out = P.tileSceneGeometry(x, y, 19, center, 0.6225146366376195);
+    const unscaled = P.tileSceneGeometry(x, y, 19, center, 1);
+
+    closeTo(out.width, unscaled.width * 0.6225146366376195, 1e-9);
+    closeTo(out.x, unscaled.x * 0.6225146366376195, 1e-9);
+    closeTo(out.z, unscaled.z * 0.6225146366376195, 1e-9);
+});
+
+test('tileSceneGeometry keeps the centroid inside its tile after scaling', () => {
+    // The origin lies somewhere inside the centroid tile, never at its
+    // centre; scaling must preserve that containment or the map patch
+    // would drift off the ground it covers.
+    const center = P.latLonToMercator(51.5007, -0.1246);
+    const x = P.long2tile(-0.1246, 19);
+    const y = P.lat2tile(51.5007, 19);
+    const out = P.tileSceneGeometry(x, y, 19, center, 0.6225146366376195);
+    assert.ok(out.x - out.width / 2 < 0 && out.x + out.width / 2 > 0, 'origin inside tile x span');
+    assert.ok(out.z - out.height / 2 < 0 && out.z + out.height / 2 > 0, 'origin inside tile z span');
+});
+
+// -------------------------------------------------------------------------
 // trueMetresPerMercatorMetre — the ADR-0002 scale factor
 // -------------------------------------------------------------------------
 test('trueMetresPerMercatorMetre is 1 at the equator', () => {
@@ -262,7 +316,7 @@ test('the module exports the documented surface', () => {
     const expected = [
         'R', 'MAX_MERCATOR_LAT', 'degToRad', 'latLonToMercator',
         'gpsToCartesian', 'getDatasetCentroid', 'long2tile', 'lat2tile',
-        'tileSizeMeters', 'tileMercatorCenter', 'trueMetresPerMercatorMetre',
+        'tileSizeMeters', 'tileMercatorCenter', 'tileSceneGeometry', 'trueMetresPerMercatorMetre',
         'mercatorToLatLon',
     ];
     expected.forEach(key => {
