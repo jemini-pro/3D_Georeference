@@ -177,8 +177,12 @@ input[type="file"]::file-selector-button:hover {
 }
 
 #map-container {
-    width: 100%;
-    height: 100%;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 0;
     display: none;       /* hidden by default; 3D mode shows scene-container */
     background: #0f172a;
 }
