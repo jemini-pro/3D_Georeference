@@ -12,11 +12,11 @@
 //     by 1/cos(latitude) relative to true metres on the ground.
 //   • True metres — altitudes and OSM building heights.
 //
-// `trueMetresPerMercatorMetre()` converts between them; the Building Layer
-// uses it to give footprints the proportions their true-metre heights
-// imply. That distinction is deliberate and documented in
-// docs/adr/0002-footprints-scaled-to-true-metres.md, which is worth reading
-// before "fixing" anything here.
+// The 3D scene resolves the difference once, per upload: `horizontalScale`
+// (cos of the centroid latitude) shrinks every horizontal offset about the
+// centroid, so Scene Space is true metres throughout (docs/adr/0005). The
+// raw Mercator functions below stay unscaled for the math that needs them —
+// the building bbox, tile indices, the 2D map.
 // =========================================================================
 (function (root, factory) {
     if (typeof module === 'object' && module.exports) {
@@ -63,15 +63,20 @@
      * antimeridian wrap so points either side of the dateline stay close
      * together.
      *
+     * `horizontalScale` applies the ADR-0005 scene frame scale to the
+     * horizontal offsets (default 1: raw Mercator offsets). Altitude is
+     * never scaled.
+     *
      * The centroid is passed in rather than read from a global so this is
      * callable from tests.
      */
-    function gpsToCartesian(lat, lng, alt, centerMercator) {
+    function gpsToCartesian(lat, lng, alt, centerMercator, horizontalScale) {
         const mercator = latLonToMercator(lat, lng);
         let dx = mercator.x - centerMercator.x;
         if (dx > TWO_PI_R / 2) dx -= TWO_PI_R;
         if (dx < -TWO_PI_R / 2) dx += TWO_PI_R;
-        return { x: dx, y: alt, z: -(mercator.y - centerMercator.y) };
+        const scale = horizontalScale === undefined ? 1 : horizontalScale;
+        return { x: dx * scale, y: alt, z: -(mercator.y - centerMercator.y) * scale };
     }
 
     /** Mid-point of the bounding box of a set of {lat, lng} points. */
@@ -112,6 +117,24 @@
     }
 
     /**
+     * A tile's scene placement and extent in one call: Mercator position
+     * relative to the centroid, negated on z, with the optional ADR-0005
+     * frame scale applied to everything horizontal. `x` and `z` are scene
+     * position; `width`/`height` are the plane extent for PlaneGeometry.
+     */
+    function tileSceneGeometry(x, y, zoom, centerMercator, horizontalScale) {
+        const scale = horizontalScale === undefined ? 1 : horizontalScale;
+        const size = tileSizeMeters(zoom) * scale;
+        const center = tileMercatorCenter(x, y, zoom);
+        return {
+            x: (center.x - centerMercator.x) * scale,
+            z: -(center.y - centerMercator.y) * scale,
+            width: size,
+            height: size,
+        };
+    }
+
+    /**
      * How many true metres one Mercator metre represents at a latitude.
      * Mercator inflates distances by 1/cos(lat), so this is cos(lat):
      * 1.0 at the equator, 0.5 at 60 degrees. Multiply a Mercator-measured
@@ -133,6 +156,7 @@
         lat2tile,
         tileSizeMeters,
         tileMercatorCenter,
+        tileSceneGeometry,
         trueMetresPerMercatorMetre,
     };
 });

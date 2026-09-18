@@ -17,9 +17,11 @@ altitude and heading. This is the only placement input the app uses.
 _Avoid_: geotag, location, position
 
 **Scene Space**:
-The app's local metre coordinate frame: Web Mercator relative to the Dataset
-Centroid, Y-up, so that `y` is altitude. All geometry in the 3D scene lives in
-this space.
+The app's local true-metre coordinate frame: Web Mercator relative to the
+Dataset Centroid, scaled horizontally by cos(centroid latitude) so every
+horizontal extent is true metres, Y-up so that `y` is altitude. All geometry
+in the 3D scene lives in this space; the one frame scale is shared by photo
+positions, ground tiles, and building footprints (docs/adr/0005).
 _Avoid_: world space, model space, map space
 
 **Dataset Centroid**:

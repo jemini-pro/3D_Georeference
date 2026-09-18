@@ -348,17 +348,37 @@ test('minWidth returns 0 rather than infinities for a degenerate ring', () => {
 });
 
 // -------------------------------------------------------------------------
-// footprintToScene — the ADR-0002 transform
+// footprintToScene — the ADR-0005 frame-scale transform
 // -------------------------------------------------------------------------
-test('footprintToScene shrinks extent by cos(latitude)', () => {
+test('footprintToScene leaves Mercator offsets untouched by default', () => {
+    // With no frame scale the footprint is pure Mercator offsets: the
+    // scene's frame is scaled as a whole by the caller, not here (ADR-0005).
     const center = P.latLonToMercator(51.5, -0.12);
     const ring = squareRing(51.5, -0.12, 0.001).map(p => ({ lat: p.lat, lon: p.lon }));
-    const out = B.footprintToScene(ring, center, 51.5);
+    const out = B.footprintToScene(ring, center);
 
     const w = Math.max(...out.map(p => p.x)) - Math.min(...out.map(p => p.x));
     const h = Math.max(...out.map(p => p.y)) - Math.min(...out.map(p => p.y));
 
-    // The Mercator extent, shrunk by cos(51.5 deg).
+    // The raw Mercator extent, with no shrink applied.
+    const rawW = P.latLonToMercator(51.5, -0.119).x - P.latLonToMercator(51.5, -0.12).x;
+    const rawH = Math.abs(P.latLonToMercator(51.501, -0.12).y - P.latLonToMercator(51.5, -0.12).y);
+    closeTo(w, rawW, 1e-6);
+    closeTo(h, rawH, 1e-6);
+});
+
+test('footprintToScene scales offsets about the origin by the frame scale', () => {
+    // The scene frame shrinks by cos(latitude) as a whole, so a footprint's
+    // every offset from the origin scales with it — and the extent lands on
+    // true metres, matching the tiles and photos around it (ADR-0005).
+    const center = P.latLonToMercator(51.5, -0.12);
+    const ring = squareRing(51.5, -0.12, 0.001).map(p => ({ lat: p.lat, lon: p.lon }));
+    const out = B.footprintToScene(ring, center, 0.6225146366376195);
+
+    const w = Math.max(...out.map(p => p.x)) - Math.min(...out.map(p => p.x));
+    const h = Math.max(...out.map(p => p.y)) - Math.min(...out.map(p => p.y));
+
+    // The raw Mercator extent, shrunk by cos(51.5 deg).
     const rawW = P.latLonToMercator(51.5, -0.119).x - P.latLonToMercator(51.5, -0.12).x;
     const rawH = Math.abs(P.latLonToMercator(51.501, -0.12).y - P.latLonToMercator(51.5, -0.12).y);
     const s = 0.6225146366376195;
@@ -367,11 +387,11 @@ test('footprintToScene shrinks extent by cos(latitude)', () => {
     closeTo(h, rawH * s, 1e-6);
 });
 
-test('footprintToScene keeps the footprint at its true position', () => {
-    // The regression this guards: scaling about the scene origin instead of
-    // the footprint would slide the building toward (0,0). Scaling about the
-    // footprint's own centre leaves that centre untouched, so a footprint far
-    // from the centroid must stay exactly where it is in Mercator terms.
+test('footprintToScene scales about the origin, not the footprint centre', () => {
+    // The frame scale moves a footprint's centre toward the origin — that is
+    // what "the frame is scaled" means — so a footprint far from the centroid
+    // is drawn exactly where the scaled tiles and photos put it. Scaling about
+    // the footprint's own centre would detach it from the map underneath.
     const center = P.latLonToMercator(60, 1.0);
     const ring = [
         { lat: 60.0000, lon: 1.0010 },
@@ -379,31 +399,22 @@ test('footprintToScene keeps the footprint at its true position', () => {
         { lat: 60.0010, lon: 1.0020 },
         { lat: 60.0010, lon: 1.0010 },
     ];
-    const out = B.footprintToScene(ring, center, 60);
+    const unscaled = B.footprintToScene(ring, center, 1);
+    const scaled = B.footprintToScene(ring, center, 0.5);
 
-    const mercX = lon => P.latLonToMercator(60.0000, lon).x - center.x;
-    const expectedCentreX = (mercX(1.0010) + mercX(1.0020)) / 2;
-
-    const actualCentreX = (Math.min(...out.map(p => p.x)) + Math.max(...out.map(p => p.x))) / 2;
-    closeTo(actualCentreX, expectedCentreX, 1e-6);
-
-    // And prove the wrong answer is genuinely different: scaling about the
-    // origin would halve this at lat 60.
-    const originScaled = expectedCentreX * Math.cos(60 * Math.PI / 180);
-    assert.ok(
-        Math.abs(originScaled - actualCentreX) > 50,
-        'the origin-scaling bug must be distinguishable from the correct result'
-    );
+    const centre = pts => ({
+        x: (Math.min(...pts.map(p => p.x)) + Math.max(...pts.map(p => p.x))) / 2,
+        y: (Math.min(...pts.map(p => p.y)) + Math.max(...pts.map(p => p.y))) / 2,
+    });
+    const uc = centre(unscaled);
+    const sc = centre(scaled);
+    closeTo(sc.x, uc.x * 0.5, 1e-6, 'centre must scale toward the origin');
+    closeTo(sc.y, uc.y * 0.5, 1e-6);
 });
 
-test('footprintToScene scales about the footprint centre, not the origin', () => {
-    // Centre the ring on the centroid: with a correct implementation the
-    // result is centred on (0,0) too, whichever way the scale is applied.
-    //
-    // Tolerance is 1 mm, not 1 um: Mercator is not perfectly symmetric about
-    // a latitude, so a symmetric ring straddling the centroid has a sub-
-    // millimetre centre offset. That is a property of the projection, not a
-    // defect in this transform.
+test('footprintToScene leaves a centroid-centred footprint centred on the origin', () => {
+    // A ring straddling the centroid has zero offset, so the frame scale
+    // cannot move it.
     const center = P.latLonToMercator(30, 0);
     const d = 0.001;
     const ring = [
@@ -412,7 +423,7 @@ test('footprintToScene scales about the footprint centre, not the origin', () =>
         { lat: 30 + d, lon: d },
         { lat: 30 + d, lon: -d },
     ];
-    const out = B.footprintToScene(ring, center, 30);
+    const out = B.footprintToScene(ring, center, 0.5);
     const cx = (Math.min(...out.map(p => p.x)) + Math.max(...out.map(p => p.x))) / 2;
     const cy = (Math.min(...out.map(p => p.y)) + Math.max(...out.map(p => p.y))) / 2;
     closeTo(cx, 0, 1e-3);
@@ -422,7 +433,7 @@ test('footprintToScene scales about the footprint centre, not the origin', () =>
 test('footprintToScene negates z, matching the scene Y-up convention', () => {
     const center = P.latLonToMercator(51.5, -0.12);
     const ring = squareRing(51.5, -0.12, 0.001);
-    const out = B.footprintToScene(ring, center, 51.5);
+    const out = B.footprintToScene(ring, center);
     // Points north of the centroid must have negative Scene z, hence
     // positive shape y (because shape y = -(scene z)).
     const northPts = out.filter((p, i) => ring[i].lat > 51.5005);
@@ -438,7 +449,7 @@ test('footprintToScene does not distort the footprint shape', () => {
         { lat: -d, lon: -d }, { lat: -d, lon: d },
         { lat: d, lon: d }, { lat: d, lon: -d },
     ];
-    const out = B.footprintToScene(ring, center, 0);
+    const out = B.footprintToScene(ring, center, 0.6225146366376195);
     const w = Math.max(...out.map(p => p.x)) - Math.min(...out.map(p => p.x));
     const h = Math.max(...out.map(p => p.y)) - Math.min(...out.map(p => p.y));
     closeTo(w, h, 1e-6);
@@ -455,7 +466,7 @@ test('buildBuildingShapes produces one shape per usable footprint', () => {
             geometry: squareRing(51.5, -0.12, 0.001),
         }],
     };
-    const out = B.buildBuildingShapes(json, center, 51.5);
+    const out = B.buildBuildingShapes(json, center, 1);
     assert.equal(out.length, 1);
     assert.equal(out[0].height, 12);
     assert.equal(out[0].heightSource, 'levels');
@@ -472,7 +483,7 @@ test('buildBuildingShapes drops footprints narrower than the threshold', () => {
             geometry: squareRing(51.5, -0.12, 0.00002),
         }],
     };
-    assert.equal(B.buildBuildingShapes(json, center, 51.5).length, 0);
+    assert.equal(B.buildBuildingShapes(json, center, 1).length, 0);
 });
 
 test('buildBuildingShapes keeps a building comfortably above the threshold', () => {
@@ -483,14 +494,14 @@ test('buildBuildingShapes keeps a building comfortably above the threshold', () 
             geometry: squareRing(51.5, -0.12, 0.0002), // ~14 m
         }],
     };
-    assert.equal(B.buildBuildingShapes(json, center, 51.5).length, 1);
+    assert.equal(B.buildBuildingShapes(json, center, 1).length, 1);
 });
 
 test('buildBuildingShapes winds outer rings counter-clockwise', () => {
     const center = P.latLonToMercator(51.5, -0.12);
     const cw = squareRing(51.5, -0.12, 0.001).reverse();
     const json = { elements: [{ type: 'way', id: 10, tags: {}, geometry: cw }] };
-    const out = B.buildBuildingShapes(json, center, 51.5);
+    const out = B.buildBuildingShapes(json, center, 1);
     assert.ok(B.signedArea(out[0].outer) > 0, 'outer ring must be CCW');
 });
 
@@ -501,7 +512,7 @@ test('buildBuildingShapes winds a courtyard opposite to its outer ring', () => {
     const rel = relationWithCourtyard();
     // Make the inner ring and the outer ring the same orientation.
     rel.members[1].geometry = rel.members[1].geometry.slice();
-    const out = B.buildBuildingShapes({ elements: [rel] }, center, 51.5);
+    const out = B.buildBuildingShapes({ elements: [rel] }, center, 1);
     assert.equal(out.length, 1);
     assert.equal(out[0].holes.length, 1);
     assert.ok(B.signedArea(out[0].outer) > 0, 'outer must be CCW');
@@ -517,7 +528,7 @@ test('buildBuildingShapes drops a courtyard too small to be real', () => {
         { lat: 51.50490, lon: -0.12500 }, { lat: 51.50490, lon: -0.12498 },
         { lat: 51.50492, lon: -0.12498 }, { lat: 51.50492, lon: -0.12500 },
     ];
-    const out = B.buildBuildingShapes({ elements: [rel] }, center, 51.5);
+    const out = B.buildBuildingShapes({ elements: [rel] }, center, 1);
     assert.equal(out[0].holes.length, 0, 'degenerate hole should be dropped');
 });
 
@@ -530,16 +541,16 @@ test('buildBuildingShapes gives every building a positive height', () => {
             { type: 'way', id: 13, tags: { height: 'junk' }, geometry: squareRing(51.504, -0.124, 0.001) },
         ],
     };
-    const out = B.buildBuildingShapes(json, center, 51.5);
+    const out = B.buildBuildingShapes(json, center, 1);
     assert.equal(out.length, 3);
     out.forEach(b => assert.ok(b.height > 0, `building ${b.osmId} height ${b.height}`));
 });
 
 test('buildBuildingShapes returns [] for an empty or malformed response', () => {
     const center = P.latLonToMercator(51.5, -0.12);
-    assert.deepEqual(B.buildBuildingShapes({ elements: [] }, center, 51.5), []);
-    assert.deepEqual(B.buildBuildingShapes(null, center, 51.5), []);
-    assert.deepEqual(B.buildBuildingShapes({ elements: 'bad' }, center, 51.5), []);
+    assert.deepEqual(B.buildBuildingShapes({ elements: [] }, center, 1), []);
+    assert.deepEqual(B.buildBuildingShapes(null, center, 1), []);
+    assert.deepEqual(B.buildBuildingShapes({ elements: 'bad' }, center, 1), []);
 });
 
 test('buildBuildingShapes handles a realistic multi-building response', () => {
@@ -552,7 +563,7 @@ test('buildBuildingShapes handles a realistic multi-building response', () => {
             geometry: squareRing(51.5 + i * 0.0001, -0.12 + i * 0.0001, 0.0002),
         });
     }
-    const out = B.buildBuildingShapes({ elements }, center, 51.5);
+    const out = B.buildBuildingShapes({ elements }, center, 1);
     assert.equal(out.length, 20);
     const sources = out.map(b => b.heightSource);
     assert.ok(sources.includes('height'));

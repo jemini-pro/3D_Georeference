@@ -391,10 +391,12 @@ const getDatasetCentroid = Projection.getDatasetCentroid;
 const long2tile = Projection.long2tile;
 const lat2tile = Projection.lat2tile;
 
-/** Scene-space position of a photo. The centre is read from `window` here
- *  so the module itself stays global-free and testable. */
+/** Scene-space position of a photo. The centre and frame scale are read
+ *  from `window` here so the module itself stays global-free and testable.
+ *  The frame scale (docs/adr/0005) shrinks horizontal offsets to true
+ *  metres, matching the tiles and buildings around them. */
 function gpsToCartesian(lat, lng, alt) {
-    return Projection.gpsToCartesian(lat, lng, alt, window.centerMercator);
+    return Projection.gpsToCartesian(lat, lng, alt, window.centerMercator, window.horizontalScale);
 }
 
 // =========================================================================
@@ -472,16 +474,13 @@ async function loadMapTiles(lat, lng) {
     for (let x = tileX - radius; x <= tileX + radius; x++) {
         for (let y = tileY - radius; y <= tileY + radius; y++) {
             const url = `https://tile.openstreetmap.org/${zoom}/${x}/${y}.png`;
-            const tileSizeMeters = Projection.tileSizeMeters(zoom);
-            const tileCenter = Projection.tileMercatorCenter(x, y, zoom);
-            const posX = tileCenter.x - window.centerMercator.x;
-            const posZ = -(tileCenter.y - window.centerMercator.y);
+            const sceneGeom = Projection.tileSceneGeometry(x, y, zoom, window.centerMercator, window.horizontalScale);
 
-            const geometry = new THREE.PlaneGeometry(tileSizeMeters, tileSizeMeters);
+            const geometry = new THREE.PlaneGeometry(sceneGeom.width, sceneGeom.height);
             const material = new THREE.MeshBasicMaterial({ color: 0x334155 });
             const plane = new THREE.Mesh(geometry, material);
             plane.rotation.x = -Math.PI / 2;
-            plane.position.set(posX, -0.5, posZ);
+            plane.position.set(sceneGeom.x, -0.5, sceneGeom.z);
 
             const toggle = document.getElementById('mapToggle');
             if (toggle) plane.visible = toggle.checked;
@@ -639,7 +638,7 @@ async function loadBuildings() {
 
     if (myToken !== buildingLoadToken) return;
 
-    const shapes = Buildings.buildBuildingShapes(json, centerMercator, window.centerLat);
+    const shapes = Buildings.buildBuildingShapes(json, centerMercator, window.horizontalScale);
 
     clearBuildings();
     shapes.forEach(shape => {
@@ -933,6 +932,11 @@ fileInput.addEventListener('change', async (e) => {
             window.centerLat = center.lat;
             window.centerLng = center.lng;
             window.centerMercator = latLonToMercator(center.lat, center.lng);
+            // ADR-0005: the whole scene frame is true metres, so horizontal
+            // offsets shrink by cos(centroid latitude) about the centroid.
+            // One scale for photos, tiles and buildings keeps them all glued
+            // to the same ground.
+            window.horizontalScale = Projection.trueMetresPerMercatorMetre(center.lat);
 
             await loadMapTiles(center.lat, center.lng);
 

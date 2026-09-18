@@ -1,6 +1,6 @@
 # 0002 — Footprints are scaled to true metres; heights are left alone
 
-Status: accepted
+Status: superseded by [ADR-0005](0005-scene-space-is-true-metres.md)
 
 ## Context
 

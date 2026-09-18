@@ -9,8 +9,8 @@
 // The Building Layer is context, not content — it exists so photo poses
 // read against real structure. See docs/adr/0004.
 //
-// The footprint scale handled here is the subtle part. See
-// footprintToScene() and docs/adr/0002-footprints-scaled-to-true-metres.md.
+// Footprints arrive as Mercator offsets and are shrunk by the scene frame
+// scale (docs/adr/0005), which the caller passes in. See footprintToScene().
 // =========================================================================
 (function (root, factory) {
     if (typeof module === 'object' && module.exports) {
@@ -208,44 +208,22 @@
      * A footprint ring (lat/lon) -> a ring in shape space: local 2D
      * coordinates for THREE.Shape, in true metres, centred on the footprint.
      *
-     * Two things happen here and both matter:
-     *
-     * 1. Position stays in Web Mercator, like every photo and ground tile in
-     *    Scene Space, so buildings land in the right place.
-     * 2. Extent is shrunk by cos(latitude) *about the footprint's own
-     *    centre*, so the building has the proportions its true-metre height
-     *    implies (docs/adr/0002).
-     *
-     * The shrink must be about the footprint, never the scene origin —
-     * scaling about the origin would move the building to the wrong place,
-     * which reads as "almost right" and is exactly the bug this comment
-     * exists to prevent.
+     * The scene frame is scaled as a whole by the caller (docs/adr/0005):
+     * position and extent both start as Web Mercator offsets about the
+     * Dataset Centroid, then `horizontalScale` shrinks every offset about
+     * the origin — so the building sits exactly where the scaled map tiles
+     * and photo positions put it. Altitudes and heights are not scaled.
      *
      * Shape-space y is negated Scene-Space z, because the mesh is rotated
      * -PI/2 about X to turn ExtrudeGeometry's +Z extrusion into scene up.
      */
-    function footprintToScene(ring, centerMercator, latitude) {
+    function footprintToScene(ring, centerMercator, horizontalScale) {
         const scene = ring.map(pt => {
-            const pos = Projection.gpsToCartesian(pt.lat, pt.lon, 0, centerMercator);
+            const pos = Projection.gpsToCartesian(pt.lat, pt.lon, 0, centerMercator, horizontalScale);
             return { x: pos.x, z: pos.z };
         });
 
-        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-        for (const p of scene) {
-            if (p.x < minX) minX = p.x;
-            if (p.x > maxX) maxX = p.x;
-            if (p.z < minZ) minZ = p.z;
-            if (p.z > maxZ) maxZ = p.z;
-        }
-        const cx = (minX + maxX) / 2;
-        const cz = (minZ + maxZ) / 2;
-
-        const scale = Projection.trueMetresPerMercatorMetre(latitude);
-
-        return scene.map(p => ({
-            x: cx + (p.x - cx) * scale,
-            y: -(cz + (p.z - cz) * scale),
-        }));
+        return scene.map(p => ({ x: p.x, y: -p.z }));
     }
 
     /**
@@ -253,16 +231,20 @@
      * scene. Rings that are too narrow are dropped. Outer rings are wound
      * counter-clockwise for THREE.Shape and holes clockwise, because a hole
      * wound the same way as its outer ring renders filled in.
+     *
+     * `horizontalScale` is the ADR-0005 frame scale (cos of the centroid
+     * latitude); pass 1 for pure Mercator offsets. The rubble filter runs in
+     * the scaled frame, so its 4 m threshold is true metres either way.
      */
-    function buildBuildingShapes(json, centerMercator, latitude) {
+    function buildBuildingShapes(json, centerMercator, horizontalScale) {
         const out = [];
         for (const parsed of parseOverpassBuildings(json)) {
-            const outer = footprintToScene(parsed.outer, centerMercator, latitude);
+            const outer = footprintToScene(parsed.outer, centerMercator, horizontalScale);
             if (outer.length < 3) continue;
             if (minWidth(outer) < MIN_FOOTPRINT_WIDTH_M) continue;
 
             const holes = parsed.holes
-                .map(hole => footprintToScene(hole, centerMercator, latitude))
+                .map(hole => footprintToScene(hole, centerMercator, horizontalScale))
                 .filter(hole => hole.length >= 3 && minWidth(hole) >= MIN_FOOTPRINT_WIDTH_M);
 
             const { height, source } = resolveBuildingHeight(parsed.tags);
