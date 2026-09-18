@@ -12,9 +12,9 @@
 //     by 1/cos(latitude) relative to true metres on the ground.
 //   • True metres — altitudes and OSM building heights.
 //
-// `trueMetresPerMercatorMetre()` converts between them, for the Building
-// Layer that will consume it. That layer does not exist yet; the distinction
-// is deliberate and documented in
+// `trueMetresPerMercatorMetre()` converts between them; the Building Layer
+// uses it to give footprints the proportions their true-metre heights
+// imply. That distinction is deliberate and documented in
 // docs/adr/0002-footprints-scaled-to-true-metres.md, which is worth reading
 // before "fixing" anything here.
 // =========================================================================
@@ -44,6 +44,17 @@
         const x = R * degToRad(lon);
         const y = R * Math.log(Math.tan(Math.PI / 4 + degToRad(clampedLat) / 2));
         return { x, y };
+    }
+
+    /**
+     * Web Mercator metres (EPSG:3857) -> WGS84 lat/lon. The inverse of
+     * `latLonToMercator`, used to turn a metric bounding box around the
+     * Dataset Centroid into the lat/lon box Overpass expects.
+     */
+    function mercatorToLatLon(x, y) {
+        const lon = (x / R) * 180 / Math.PI;
+        const lat = (2 * Math.atan(Math.exp(y / R)) - Math.PI / 2) * 180 / Math.PI;
+        return { lat, lon };
     }
 
     /**
@@ -115,6 +126,7 @@
         MAX_MERCATOR_LAT,
         degToRad,
         latLonToMercator,
+        mercatorToLatLon,
         gpsToCartesian,
         getDatasetCentroid,
         long2tile,

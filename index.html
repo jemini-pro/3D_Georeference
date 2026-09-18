@@ -23,6 +23,10 @@
          before script.js, which binds to it. -->
     <script src="projection.js" defer></script>
 
+    <!-- buildings.js: parses OSM Overpass geometry into extrudable shapes.
+         Depends on projection.js; must load before script.js. -->
+    <script src="buildings.js" defer></script>
+
     <!-- exif-js: still needed for EXIF GPS parsing (fflate just gives us bytes) -->
     <script src="https://cdn.jsdelivr.net/npm/exif-js" defer></script>
 

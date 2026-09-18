@@ -79,6 +79,33 @@ test('latLonToMercator stays finite at the poles', () => {
 });
 
 // -------------------------------------------------------------------------
+// mercatorToLatLon
+// -------------------------------------------------------------------------
+test('mercatorToLatLon inverts latLonToMercator', () => {
+    const points = [
+        [0, 0], [49, 2], [-33.87, 151.21], [51.5007, -0.1246],
+        [60, -100], [-45, 170],
+    ];
+    points.forEach(([lat, lon]) => {
+        const m = P.latLonToMercator(lat, lon);
+        const back = P.mercatorToLatLon(m.x, m.y);
+        assert.ok(Math.abs(back.lat - lat) < 1e-9, `lat ${lat} -> ${back.lat}`);
+        assert.ok(Math.abs(back.lon - lon) < 1e-9, `lon ${lon} -> ${back.lon}`);
+    });
+});
+
+test('mercatorToLatLon maps the origin to (0, 0)', () => {
+    const p = P.mercatorToLatLon(0, 0);
+    assert.ok(Math.abs(p.lat) < 1e-12);
+    assert.ok(Math.abs(p.lon) < 1e-12);
+});
+
+test('mercatorToLatLon puts half the world width at lon 180', () => {
+    closeTo(P.mercatorToLatLon(Math.PI * P.R, 0).lon, 180, 1e-9);
+    closeTo(P.mercatorToLatLon(-Math.PI * P.R, 0).lon, -180, 1e-9);
+});
+
+// -------------------------------------------------------------------------
 // gpsToCartesian
 // -------------------------------------------------------------------------
 test('gpsToCartesian puts the centre itself at the origin', () => {
@@ -236,6 +263,7 @@ test('the module exports the documented surface', () => {
         'R', 'MAX_MERCATOR_LAT', 'degToRad', 'latLonToMercator',
         'gpsToCartesian', 'getDatasetCentroid', 'long2tile', 'lat2tile',
         'tileSizeMeters', 'tileMercatorCenter', 'trueMetresPerMercatorMetre',
+        'mercatorToLatLon',
     ];
     expected.forEach(key => {
         assert.ok(key in P, `expected projection.js to export ${key}`);
