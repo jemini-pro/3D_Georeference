@@ -147,12 +147,43 @@ test('fetchTerrainElevations survives a network throw as nulls', async () => {
 });
 
 // -------------------------------------------------------------------------
+// rebaseElevations — the Ground Reference shift (ADR-0006)
+// -------------------------------------------------------------------------
+test('rebaseElevations measures every point above the ground reference', () => {
+    const out = T.rebaseElevations([1599, 1610, 1580], 1599);
+    assert.deepEqual(out, [0, 11, -19]);
+});
+
+test('rebaseElevations maps the reference itself to zero', () => {
+    assert.deepEqual(T.rebaseElevations([2920], 2920), [0]);
+});
+
+test('rebaseElevations preserves relief between points', () => {
+    const out = T.rebaseElevations([10, 30, 20], 10);
+    assert.equal(out[1] - out[0], 20, 'differences are unchanged by the shift');
+    assert.equal(out[2] - out[0], 10);
+});
+
+test('rebaseElevations passes missing points through as null', () => {
+    assert.deepEqual(T.rebaseElevations([100, null, 120], 100), [0, null, 20]);
+});
+
+test('rebaseElevations returns all nulls when the reference is unresolved', () => {
+    assert.deepEqual(T.rebaseElevations([100, 120], null), [null, null]);
+    assert.deepEqual(T.rebaseElevations([100, 120], undefined), [null, null]);
+});
+
+test('rebaseElevations handles an empty list', () => {
+    assert.deepEqual(T.rebaseElevations([], 100), []);
+});
+
+// -------------------------------------------------------------------------
 // Module loading
 // -------------------------------------------------------------------------
 test('the module exports the documented surface', () => {
     const expected = [
         'buildElevationUrl', 'chunkCoords', 'extractElevations',
-        'fetchTerrainElevations',
+        'fetchTerrainElevations', 'rebaseElevations',
     ];
     expected.forEach(key => assert.ok(key in T, `expected terrain.js to export ${key}`));
 });

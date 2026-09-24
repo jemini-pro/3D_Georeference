@@ -65,6 +65,13 @@ terrain model. Used to sit buildings on the land, and never exposed as a
 photo-relative measurement.
 _Avoid_: ground height, DEM, elevation
 
+**Ground Reference**:
+The Terrain Elevation under the Dataset Centroid, computed once per upload. It
+is the zero of the scene's vertical axis: building bases are measured above
+it, so they rest on the flat ground plane at `y = 0` rather than at their
+absolute sea-level height (docs/adr/0006).
+_Avoid_: sea level, datum, base height
+
 **Altitude**:
 A photo's height above sea level, as read from its EXIF. Not the same as
 Terrain Elevation (the ground below it) or Building Height (the structure
