@@ -10,7 +10,7 @@ app automatically falls back to a fast **2D coverage map** that scales to
 
 Built as a single-page app, no build step, no backend. All client-side.
 
-**Live demo:** https://jem-cell.github.io/3D_Georeference/
+**Live demo:** https://jemini-pro.github.io/3D_Georeference/
 
 ![Screenshot: geotagged photos plotted as bubbles on an OpenStreetMap ground plane with camera frustum arrows showing heading](./screenshot.png)
 
@@ -94,13 +94,31 @@ callback detect its own obsolescence and dispose its texture instead.
 ## Running locally
 
 ```bash
-git clone https://github.com/jem-cell/3D_Georeference.git
+git clone https://github.com/jemini-pro/3D_Georeference.git
 cd 3D_Georeference
 python3 -m http.server 8000
 # open http://localhost:8000/
 ```
 
 Or any static-file server. There is no build step.
+
+### Running the tests
+
+The pure logic modules (`projection.js`, `buildings.js`) have zero-dependency
+tests using Node's built-in test runner:
+
+```bash
+node --test
+```
+
+This is what CI runs. To try the app end-to-end without a real drone archive,
+synthesize a small geotagged ZIP around Big Ben:
+
+```bash
+pip install pillow piexif
+python3 scripts/make-geotagged-zip.py test_photos.zip
+# then upload test_photos.zip through the app's file input
+```
 
 ## Tech
 
