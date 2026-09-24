@@ -20,24 +20,29 @@ visible as well as measurable.
 
 Working path:
 
-- One batched request against `api.open-meteo.com/v1/elevation` carried all
-  building centroids (single GET, `latitude=…&longitude=…` arrays) — no
-  per-building fan-out. (49 centroids in the first pass, 37 in the re-run:
-  Overpass returns a slightly different set per query.)
-- Every rendered building now sits with its base on its Terrain Elevation:
-  bases at 5–26 m across the site (e.g. Big Ben, 96 m tall, base at 8 m → roof
-  at 104 m ASL) instead of all at sea level. Verified on the ADR-0005
-  true-metre scene frame (37/37 lifted in the re-run at
-  `horizontalScale = 0.6225`).
-- Photo bubbles are untouched: still at `y = 35` (EXIF `GPSAltitude`), the same
-  metres-above-sea-level frame the building bases and roofs now live in.
+- One batched request against `api.open-meteo.com/v1/elevation` carried the
+  Dataset Centroid plus every building centroid (single GET,
+  `latitude=…&longitude=…` arrays) — no per-building fan-out. (49 centroids in
+  the first pass, 37 in the re-run: Overpass returns a slightly different set
+  per query.)
+- Every rendered building now sits with its base on the scene's Ground
+  Reference — the Terrain Elevation under the Dataset Centroid (docs/adr/0006).
+  On this site the reference is 8 m ASL, so bases land at roughly −3…18 m
+  *relative to the flat ground plane* (e.g. Big Ben, 96 m tall, base near 0 →
+  roof near 96) rather than at their absolute 5–26 m ASL. Building positions
+  are re-based so the ground plane's `y = 0` is the real local ground; the
+  absolute sea-level frame is not used for placement. Verified on the ADR-0005
+  true-metre scene frame (`horizontalScale = 0.6225`).
+- Photo bubbles are untouched: still at `y = 35` (EXIF `GPSAltitude`). Per
+  docs/adr/0003 the EXIF altitude datum is ambiguous, so it is deliberately not
+  re-based against the DEM.
 - No photo-relative readout ("above ground" / "above roof") is computed or
   displayed anywhere — ADR-0003 holds.
 
 Failure path (terrain fetch blocked at the network layer):
 
-- All buildings still render, every one at sea level (`terrain: null`, base
-  at 0) — byte-for-byte the pre-change behaviour.
+- All buildings still render, every one on the flat ground plane
+  (`terrain: null`, base at 0) — byte-for-byte the pre-change behaviour.
 - The upload completes, the status line stays green, and only a console warning
   records the degradation. No error is shown to the user.
 
@@ -45,8 +50,8 @@ Failure path (terrain fetch blocked at the network layer):
 
 | File | Shows |
 | --- | --- |
-| `01-after-upload-terrain-lift.png` | Bubbles at 35 m; buildings standing on the land, bases spread 5–26 m across the sloping site. |
-| `03-terrain-failure-buildings-at-sea-level.png` | Same upload with the elevation fetch blocked: buildings collapsed to the flat sea-level ground, upload still succeeds. |
+| `01-after-upload-terrain-lift.png` | Bubbles at 35 m; buildings standing on the ground plane, bases spread across the sloping site. |
+| `03-terrain-failure-buildings-at-sea-level.png` | Same upload with the elevation fetch blocked: buildings collapsed to the flat ground plane, upload still succeeds. |
 
 ## Notes
 
