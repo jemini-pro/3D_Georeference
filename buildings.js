@@ -132,6 +132,18 @@
         return { x: x / ring.length, y: y / ring.length };
     }
 
+    /**
+     * The lat/lon centroid of a footprint, used as the point whose Terrain
+     * Elevation the building sits on. The DEM resolves at ~90 m, so a
+     * building-sized footprint is sub-pixel; its centroid is the honest
+     * answer and keeps the lookup one point per building.
+     */
+    function ringCentroidLatLon(ring) {
+        let lat = 0, lon = 0;
+        for (const p of ring) { lat += p.lat; lon += p.lon; }
+        return { lat: lat / ring.length, lon: lon / ring.length };
+    }
+
     function parseBuildingRelation(el) {
         const members = Array.isArray(el.members) ? el.members : [];
         const outers = [];
@@ -248,10 +260,13 @@
                 .filter(hole => hole.length >= 3 && minWidth(hole) >= MIN_FOOTPRINT_WIDTH_M);
 
             const { height, source } = resolveBuildingHeight(parsed.tags);
+            const centroid = ringCentroidLatLon(parsed.outer);
             out.push({
                 osmId: parsed.osmId,
                 height,
                 heightSource: source,
+                lat: centroid.lat,
+                lon: centroid.lon,
                 outer: ensureCCW(outer),
                 holes: holes.map(ensureCW),
             });
@@ -271,6 +286,7 @@
         ensureCCW,
         ensureCW,
         pointInRing,
+        ringCentroidLatLon,
         footprintToScene,
         buildBuildingShapes,
     };
