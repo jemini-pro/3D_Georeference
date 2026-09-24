@@ -12,6 +12,10 @@
 // may be derived from it or shown. A failed or rate-limited lookup must
 // never fail the upload — callers receive `null` per missing point and
 // degrade to the flat sea-level ground.
+//
+// `fetchTerrainElevations` returns absolute metres above sea level; the
+// caller re-bases them onto the scene's Ground Reference with
+// `rebaseElevations` (docs/adr/0006).
 // =========================================================================
 (function (root, factory) {
     if (typeof module === 'object' && module.exports) {
@@ -89,6 +93,30 @@
         return results.flat();
     }
 
+    /**
+     * Re-base absolute sea-level elevations onto the Ground Reference: each
+     * result is its height (metres) above that reference, so relief between
+     * points survives while the reference itself maps to 0 — the scene's
+     * flat ground plane.
+     *
+     * The whole scene shares one Ground Reference (the Terrain Elevation
+     * under the Dataset Centroid), so a building's base lands on the plane
+     * the ground tiles sit on rather than at its absolute sea-level height,
+     * which would leave it floating on any elevated site (docs/adr/0006).
+     *
+     * A missing point stays `null`. If the reference itself is unresolved
+     * every result is `null`, so the caller degrades to the flat plane for
+     * the whole Building Layer rather than guessing an offset.
+     */
+    function rebaseElevations(elevations, groundReference) {
+        if (groundReference === null || groundReference === undefined) {
+            return elevations.map(() => null);
+        }
+        return elevations.map(e =>
+            (e === null || e === undefined) ? null : e - groundReference
+        );
+    }
+
     return {
         ELEVATION_ENDPOINT,
         BATCH_SIZE,
@@ -96,5 +124,6 @@
         chunkCoords,
         extractElevations,
         fetchTerrainElevations,
+        rebaseElevations,
     };
 });

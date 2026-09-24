@@ -588,11 +588,11 @@ function createBuildingMesh(building) {
     ];
     const mesh = new THREE.Mesh(geometry, materials);
 
-    // Terrain Elevation is metres above sea level, the same frame photo
-    // Altitudes enter Scene Space in (y: alt), so lifting the building by
-    // its ground height makes bubble-to-roof distances honest. Buildings
-    // with an unresolved lookup (terrain: null) stay at sea level exactly
-    // as before — the flat ground plane.
+    // Terrain Elevation arrives re-based onto the scene's Ground Reference
+    // (docs/adr/0006), so `terrain` is metres above the flat ground plane
+    // the tiles sit on: 0 means "on the plane", and only genuine local
+    // relief moves a building. An unresolved lookup (terrain: null) leaves
+    // the base on the plane exactly as before.
     if (building.terrain !== null && building.terrain !== undefined) {
         mesh.position.y = building.terrain;
     }
@@ -662,17 +662,25 @@ async function loadBuildings() {
 
     const shapes = Buildings.buildBuildingShapes(json, centerMercator, window.horizontalScale);
 
-    // Resolve the ground height under each building. A failed or
-    // rate-limited lookup produces nulls and buildings render at sea
-    // level — never an error the user needs to see.
+    // Resolve Terrain Elevation for every building centroid AND the Dataset
+    // Centroid itself, in one batched request. The centroid's value is the
+    // scene's Ground Reference: the ground tiles sit on the flat plane at
+    // y=0, so building bases must be measured above that same reference
+    // rather than from absolute sea level, or every building floats by the
+    // site's altitude (docs/adr/0006). A failed or rate-limited lookup
+    // produces nulls and buildings render on the flat plane — never an
+    // error the user needs to see.
+    const groundPoint = { lat: window.centerLat, lon: window.centerLng };
     let elevations = null;
     if (typeof Terrain !== 'undefined') {
         try {
-            elevations = await Terrain.fetchTerrainElevations(
-                shapes.map(s => ({ lat: s.lat, lon: s.lon }))
+            const resolved = await Terrain.fetchTerrainElevations(
+                [groundPoint, ...shapes.map(s => ({ lat: s.lat, lon: s.lon }))]
             );
+            window.groundReference = resolved[0];
+            elevations = Terrain.rebaseElevations(resolved.slice(1), resolved[0]);
         } catch (err) {
-            console.warn('Terrain Elevation unavailable; buildings sit at sea level.', err?.message || err);
+            console.warn('Terrain Elevation unavailable; buildings sit on the flat ground plane.', err?.message || err);
         }
     }
     if (myToken !== buildingLoadToken) return;
