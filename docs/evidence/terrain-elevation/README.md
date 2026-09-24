@@ -27,12 +27,16 @@ Working path:
   per query.)
 - Every rendered building now sits with its base on the scene's Ground
   Reference — the Terrain Elevation under the Dataset Centroid (docs/adr/0006).
-  On this site the reference is 8 m ASL, so bases land at roughly −3…18 m
-  *relative to the flat ground plane* (e.g. Big Ben, 96 m tall, base near 0 →
-  roof near 96) rather than at their absolute 5–26 m ASL. Building positions
-  are re-based so the ground plane's `y = 0` is the real local ground; the
-  absolute sea-level frame is not used for placement. Verified on the ADR-0005
-  true-metre scene frame (`horizontalScale = 0.6225`).
+  On this site the reference is 8 m ASL, so bases are re-based to the flat
+  ground plane rather than their absolute 5–26 m ASL (e.g. Big Ben, 96 m tall).
+  The plane's `y = 0` is the real local ground; the absolute sea-level frame is
+  not used for placement. Verified on the ADR-0005 true-metre scene frame
+  (`horizontalScale = 0.6225`).
+- Ground downhill from the centroid rebases negative, which would sink a
+  building through the flat map sheet; bases are clamped to the plane
+  (docs/adr/0007). Before the clamp, 7 of 17 buildings sat below the sheet;
+  after it, 0 do, and 9 of 17 rest on the plane (the rest carry genuine relief
+  up to 13 m).
 - Photo bubbles are untouched: still at `y = 35` (EXIF `GPSAltitude`). Per
   docs/adr/0003 the EXIF altitude datum is ambiguous, so it is deliberately not
   re-based against the DEM.

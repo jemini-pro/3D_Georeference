@@ -15,7 +15,8 @@
 //
 // `fetchTerrainElevations` returns absolute metres above sea level; the
 // caller re-bases them onto the scene's Ground Reference with
-// `rebaseElevations` (docs/adr/0006).
+// `rebaseElevations` and keeps them on the map sheet with
+// `clampToGroundPlane` (docs/adr/0006, docs/adr/0007).
 // =========================================================================
 (function (root, factory) {
     if (typeof module === 'object' && module.exports) {
@@ -117,6 +118,23 @@
         );
     }
 
+    /**
+     * Keep building bases on the ground plane, never through it (docs/adr/0007).
+     *
+     * The map overlay is a single flat sheet at the Ground Reference, so a
+     * base below that reference — ground downhill from the Dataset Centroid
+     * — would poke down through the sheet and render under the map. Clamping
+     * at 0 rests such a building on the plane instead. Ground above the
+     * reference keeps its full relief; only the negative side is flattened.
+     *
+     * A missing point stays `null`.
+     */
+    function clampToGroundPlane(elevations) {
+        return elevations.map(e =>
+            (e === null || e === undefined) ? null : Math.max(0, e)
+        );
+    }
+
     return {
         ELEVATION_ENDPOINT,
         BATCH_SIZE,
@@ -125,5 +143,6 @@
         extractElevations,
         fetchTerrainElevations,
         rebaseElevations,
+        clampToGroundPlane,
     };
 });

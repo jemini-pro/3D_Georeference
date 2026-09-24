@@ -178,12 +178,38 @@ test('rebaseElevations handles an empty list', () => {
 });
 
 // -------------------------------------------------------------------------
+// clampToGroundPlane — never through the map sheet (ADR-0007)
+// -------------------------------------------------------------------------
+test('clampToGroundPlane lifts negative bases onto the plane', () => {
+    assert.deepEqual(T.clampToGroundPlane([-2, 0, 5]), [0, 0, 5]);
+});
+
+test('clampToGroundPlane leaves ground above the plane untouched', () => {
+    assert.deepEqual(T.clampToGroundPlane([0, 11, 18]), [0, 11, 18]);
+});
+
+test('clampToGroundPlane passes missing points through as null', () => {
+    assert.deepEqual(T.clampToGroundPlane([-1, null, 4]), [0, null, 4]);
+});
+
+test('clampToGroundPlane handles an empty list', () => {
+    assert.deepEqual(T.clampToGroundPlane([]), []);
+});
+
+test('clamping after a rebase keeps every base at or above the plane', () => {
+    const rebased = T.rebaseElevations([1590, 1599, 1610], 1599);
+    const clamped = T.clampToGroundPlane(rebased);
+    assert.ok(clamped.every(e => e >= 0), 'no base may sit below the ground plane');
+    assert.deepEqual(clamped, [0, 0, 11]);
+});
+
+// -------------------------------------------------------------------------
 // Module loading
 // -------------------------------------------------------------------------
 test('the module exports the documented surface', () => {
     const expected = [
         'buildElevationUrl', 'chunkCoords', 'extractElevations',
-        'fetchTerrainElevations', 'rebaseElevations',
+        'fetchTerrainElevations', 'rebaseElevations', 'clampToGroundPlane',
     ];
     expected.forEach(key => assert.ok(key in T, `expected terrain.js to export ${key}`));
 });
