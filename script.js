@@ -587,7 +587,22 @@ function createBuildingMesh(building) {
         new THREE.MeshStandardMaterial({ color: BUILDING_FACADE_COLOR, roughness: 0.85, metalness: 0.0 }),
     ];
     const mesh = new THREE.Mesh(geometry, materials);
-    mesh.userData = { osmId: building.osmId, height: building.height, isBuilding: true };
+
+    // Terrain Elevation is metres above sea level, the same frame photo
+    // Altitudes enter Scene Space in (y: alt), so lifting the building by
+    // its ground height makes bubble-to-roof distances honest. Buildings
+    // with an unresolved lookup (terrain: null) stay at sea level exactly
+    // as before — the flat ground plane.
+    if (building.terrain !== null && building.terrain !== undefined) {
+        mesh.position.y = building.terrain;
+    }
+
+    mesh.userData = {
+        osmId: building.osmId,
+        height: building.height,
+        terrain: building.terrain ?? null,
+        isBuilding: true,
+    };
     return mesh;
 }
 
@@ -607,6 +622,13 @@ function clearBuildings() {
  * or failed Overpass request must not delay or fail the upload. `token`
  * guards against a previous upload's slower fetch landing on top of the
  * current scene.
+ *
+ * Terrain Elevation is resolved in the same non-blocking spirit: one
+ * batched request against the keyless Copernicus DEM endpoint, and a
+ * failed lookup leaves the building on the flat sea-level ground exactly
+ * as before (docs/adr/0003 — the terrain is coarse surface data, good
+ * enough to sit buildings on the land and not good enough to derive any
+ * photo-relative measurement from).
  *
  * Reads the Dataset Centroid the upload flow has already published to
  * `window`, rather than taking it as a parameter — the scene and the photos
@@ -640,8 +662,24 @@ async function loadBuildings() {
 
     const shapes = Buildings.buildBuildingShapes(json, centerMercator, window.horizontalScale);
 
+    // Resolve the ground height under each building. A failed or
+    // rate-limited lookup produces nulls and buildings render at sea
+    // level — never an error the user needs to see.
+    let elevations = null;
+    if (typeof Terrain !== 'undefined') {
+        try {
+            elevations = await Terrain.fetchTerrainElevations(
+                shapes.map(s => ({ lat: s.lat, lon: s.lon }))
+            );
+        } catch (err) {
+            console.warn('Terrain Elevation unavailable; buildings sit at sea level.', err?.message || err);
+        }
+    }
+    if (myToken !== buildingLoadToken) return;
+
     clearBuildings();
-    shapes.forEach(shape => {
+    shapes.forEach((shape, i) => {
+        if (elevations && i < elevations.length) shape.terrain = elevations[i];
         const mesh = createBuildingMesh(shape);
         scene.add(mesh);
         buildings.push(mesh);

@@ -532,6 +532,20 @@ test('buildBuildingShapes drops a courtyard too small to be real', () => {
     assert.equal(out[0].holes.length, 0, 'degenerate hole should be dropped');
 });
 
+test('buildBuildingShapes carries the footprint centroid for terrain lookup', () => {
+    const center = P.latLonToMercator(51.5, -0.12);
+    const json = {
+        elements: [{
+            type: 'way', id: 14, tags: {},
+            geometry: squareRing(51.5, -0.12, 0.001),
+        }],
+    };
+    const out = B.buildBuildingShapes(json, center, 1);
+    assert.equal(out.length, 1);
+    closeTo(out[0].lat, 51.5005, 0.001, 'centroid latitude of the ring');
+    closeTo(out[0].lon, -0.1195, 0.001, 'centroid longitude of the ring');
+});
+
 test('buildBuildingShapes gives every building a positive height', () => {
     const center = P.latLonToMercator(51.5, -0.12);
     const json = {
@@ -579,7 +593,7 @@ test('the module exports the documented surface', () => {
         'LEVEL_HEIGHT_M', 'DEFAULT_BUILDING_HEIGHT_M', 'MIN_FOOTPRINT_WIDTH_M',
         'parseLength', 'resolveBuildingHeight', 'parseOverpassBuildings',
         'signedArea', 'minWidth', 'ensureCCW', 'ensureCW',
-        'pointInRing', 'footprintToScene', 'buildBuildingShapes',
+        'pointInRing', 'ringCentroidLatLon', 'footprintToScene', 'buildBuildingShapes',
     ];
     expected.forEach(key => assert.ok(key in B, `expected buildings.js to export ${key}`));
 });

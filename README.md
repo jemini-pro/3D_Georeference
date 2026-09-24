@@ -32,6 +32,9 @@ output. Both modes share the same EXIF parsing and lat/lng projection.
 - **3D bubbles** for each photo at its real-world Mercator position, scaled by altitude (3D mode).
 - **Camera frustum arrows** drawn from each bubble showing the heading the photo was taken (3D mode).
 - **OpenStreetMap ground overlay** — 5×5 tile grid at zoom 19 centred on your data.
+- **Building masses** stand on the real terrain — ground height under each
+  building is resolved from the keyless Copernicus DEM (Open-Meteo), so bubbles
+  and roofs share the same metres-above-sea-level frame.
 - **Bubble controls** — size slider, colour picker, hover-to-highlight (3D mode).
 - **Click a bubble** to centre the camera on it (3D mode).
 - **Density heatmap** toggle for the 2D map.
@@ -67,7 +70,11 @@ bigger refactor; the current chunk-and-upload path is good enough.
    to the dataset's centroid so the origin is at the scene centre) and adds
    a `THREE.Mesh` sphere with a `LineSegments` frustum.
 4. The 2D path adds each photo as a `L.circleMarker` with a hover tooltip.
-5. The camera / map auto-fits the bounding box of all points.
+5. The 3D path lifts each building onto its Terrain Elevation — ground height
+   above sea level from the keyless Open-Meteo Copernicus DEM endpoint, batched
+   at up to 100 centroids per request. A failed lookup degrades to the flat
+   sea-level ground; it never fails or delays the upload (docs/adr/0003).
+6. The camera / map auto-fits the bounding box of all points.
 
 ### Why Web Mercator relative-to-centroid?
 
@@ -104,8 +111,8 @@ Or any static-file server. There is no build step.
 
 ### Running the tests
 
-The pure logic modules (`projection.js`, `buildings.js`) have zero-dependency
-tests using Node's built-in test runner:
+The pure logic modules (`projection.js`, `buildings.js`, `terrain.js`) have
+zero-dependency tests using Node's built-in test runner:
 
 ```bash
 node --test
