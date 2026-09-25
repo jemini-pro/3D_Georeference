@@ -667,7 +667,9 @@ async function loadBuildings() {
     // scene's Ground Reference: the ground tiles sit on the flat plane at
     // y=0, so building bases must be measured above that same reference
     // rather than from absolute sea level, or every building floats by the
-    // site's altitude (docs/adr/0006). A failed or rate-limited lookup
+    // site's altitude (docs/adr/0006). Ground downhill from the centroid
+    // would rebase negative and punch through the map sheet, so bases are
+    // clamped to the plane (docs/adr/0007). A failed or rate-limited lookup
     // produces nulls and buildings render on the flat plane — never an
     // error the user needs to see.
     const groundPoint = { lat: window.centerLat, lon: window.centerLng };
@@ -678,7 +680,8 @@ async function loadBuildings() {
                 [groundPoint, ...shapes.map(s => ({ lat: s.lat, lon: s.lon }))]
             );
             window.groundReference = resolved[0];
-            elevations = Terrain.rebaseElevations(resolved.slice(1), resolved[0]);
+            const rebased = Terrain.rebaseElevations(resolved.slice(1), resolved[0]);
+            elevations = Terrain.clampToGroundPlane(rebased);
         } catch (err) {
             console.warn('Terrain Elevation unavailable; buildings sit on the flat ground plane.', err?.message || err);
         }

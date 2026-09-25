@@ -55,8 +55,7 @@ _Avoid_: buildings, geometry, overlay
 
 **Building Height**:
 The true-metre height of a building's top above the ground beside it, as
-recorded in source map data. Deliberately distinct from a photo's Altitude,
-which is metres above sea level in Scene Space.
+recorded in source map data. Deliberately distinct from a photo's Altitude.
 _Avoid_: elevation, altitude, roof height
 
 **Terrain Elevation**:
@@ -67,13 +66,16 @@ _Avoid_: ground height, DEM, elevation
 
 **Ground Reference**:
 The Terrain Elevation under the Dataset Centroid, computed once per upload. It
-is the zero of the scene's vertical axis: building bases are measured above
-it, so they rest on the flat ground plane at `y = 0` rather than at their
-absolute sea-level height (docs/adr/0006).
+is the zero of the scene's vertical axis: building bases are measured above it
+(and clamped so none sink below it), so they rest on the flat ground plane at
+`y = 0` rather than at their absolute sea-level height (docs/adr/0006,
+docs/adr/0007).
 _Avoid_: sea level, datum, base height
 
 **Altitude**:
-A photo's height above sea level, as read from its EXIF. Not the same as
-Terrain Elevation (the ground below it) or Building Height (the structure
-beside it).
+A photo's height as read from its EXIF. It is **not** reliably above sea
+level: DJI writes an ellipsoidal (or barometric) value there, so it is in the
+camera's own datum and not directly comparable to Terrain Elevation. Not the
+same as Terrain Elevation (the ground below it) or Building Height (the
+structure beside it) — see docs/research/dji-altitude-vs-terrain-layer.md.
 _Avoid_: elevation, height, Z
